@@ -17,7 +17,7 @@ from . import admin_communications
 from . import public_referral
 from . import checker
 
-VERSION='5.12.0'
+VERSION='5.13.0'
 
 
 def _drop_route(path, method=None):
@@ -64,4 +64,4 @@ def health_db():
 
 @app.get('/health/management')
 def health_management():
-    return {'ok':True,'service':'hub24-worker','version':VERSION,'management_routes':True,'marketplace_routes':True,'vip_market_routes':True,'community_routes':True,'banner_slot_routes':True,'referral_routes':True,'operations_hardening_routes':True,'banner_admin_hardening_routes':True,'usdt_autocharge_routes':True,'member_admin_routes':True,'admin_communications_routes':True,'public_referral_validation':True,'stability_hardening_routes':True,'private_evidence_routes':True,'usdt_claim_hardening_routes':True,'checker_routes':True,'google_fx_auto_refresh':True,'usdt_verify_diagnostics':True,'legacy_manual_charge_routes':False,'legacy_withdrawal_route':False}
+    return {'ok':True,'service':'hub24-worker','version':VERSION,'management_routes':True,'marketplace_routes':True,'vip_market_routes':True,'community_routes':True,'banner_slot_routes':True,'referral_routes':True,'operations_hardening_routes':True,'banner_admin_hardening_routes':True,'usdt_autocharge_routes':True,'member_admin_routes':True,'admin_communications_routes':True,'public_referral_validation':True,'stability_hardening_routes':True,'private_evidence_routes':True,'usdt_claim_hardening_routes':True,'checker_routes':True,'checker_provider_mode':'TASK_POLL_EXPORT','checker_api_configured':bool(settings.check_api_base_url and settings.check_api_key),'google_fx_auto_refresh':True,'usdt_verify_diagnostics':True,'legacy_manual_charge_routes':False,'legacy_withdrawal_route':False}
