@@ -55,6 +55,11 @@ async def checker_upload_v2(file:UploadFile=File(...),activity_days:int=Form(0),
     if batch:q('npay_checker_items').insert(batch).execute()
     return {'job':job,'quote':quote}
 
+@app.get('/v1/checker/jobs')
+def checker_jobs_v2(user=Depends(auth)):
+    rows=q('npay_checker_jobs').select('*').eq('user_id',user).neq('status','DRAFT').order('created_at',desc=True).limit(100).execute().data or []
+    return {'items':rows}
+
 @app.get('/v1/checker/jobs/{jid}/results')
 def checker_results_v2(jid:int,limit:int=200,user=Depends(auth)):
     job=q('npay_checker_jobs').select('activity_days').eq('id',jid).eq('user_id',user).maybe_single().execute().data
