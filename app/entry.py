@@ -39,9 +39,14 @@ _drop_route('/v1/market/products/{pid}/buy','POST')
 _drop_route('/v1/market/trades/{tid}/evidence','GET')
 _drop_route('/v1/market/trades/{tid}/evidence','POST')
 _drop_route('/v1/admin/market/trades/{tid}/evidence','GET')
+_drop_route('/v1/wallet/usdt-charge-requests/{rid}/verify','POST')
+
+# The original USDT loop is replaced with a DB-claim serialized loop.
+app.router.on_startup=[fn for fn in app.router.on_startup if getattr(fn,'__name__','')!='start_usdt_autocharge_loop']
 
 from . import stability_hardening
 from . import private_evidence
+from . import usdt_claim_hardening
 
 @app.get('/health')
 def health():
@@ -57,4 +62,4 @@ def health_db():
 
 @app.get('/health/management')
 def health_management():
-    return {'ok':True,'service':'hub24-worker','version':VERSION,'management_routes':True,'marketplace_routes':True,'vip_market_routes':True,'community_routes':True,'banner_slot_routes':True,'referral_routes':True,'operations_hardening_routes':True,'banner_admin_hardening_routes':True,'usdt_autocharge_routes':True,'member_admin_routes':True,'admin_communications_routes':True,'stability_hardening_routes':True,'private_evidence_routes':True,'google_fx_auto_refresh':True,'usdt_verify_diagnostics':True,'legacy_manual_charge_routes':False,'legacy_withdrawal_route':False}
+    return {'ok':True,'service':'hub24-worker','version':VERSION,'management_routes':True,'marketplace_routes':True,'vip_market_routes':True,'community_routes':True,'banner_slot_routes':True,'referral_routes':True,'operations_hardening_routes':True,'banner_admin_hardening_routes':True,'usdt_autocharge_routes':True,'member_admin_routes':True,'admin_communications_routes':True,'stability_hardening_routes':True,'private_evidence_routes':True,'usdt_claim_hardening_routes':True,'google_fx_auto_refresh':True,'usdt_verify_diagnostics':True,'legacy_manual_charge_routes':False,'legacy_withdrawal_route':False}
