@@ -45,7 +45,7 @@ def issue_referral_code(user=Depends(auth)):
 
 @app.get('/v1/referrals/leaderboard')
 def referral_leaderboard(user=Depends(auth)):
-    month_start=current_month_start_utc();rows=q('npay_referrals').select('referrer_user_id,qualified_at').not_.is_('qualified_at','null').gte('qualified_at',month_start).limit(10000).execute().data or [];counts={}
+    month_start=current_month_start_utc();rows=q('npay_referrals').select('referrer_user_id,qualified_at').gte('qualified_at',month_start).limit(10000).execute().data or [];counts={}
     for r in rows:
         uid=str(r.get('referrer_user_id'));counts[uid]=counts.get(uid,0)+1
     reward_rows=q('npay_referral_rewards').select('referrer_user_id,reward_amount,created_at').gte('created_at',month_start).limit(10000).execute().data or [];rewards={}
