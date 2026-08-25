@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-import secrets
+import re
 from fastapi import Depends, HTTPException
+from pydantic import BaseModel
 from .main import app, auth
 from . import db
 
@@ -24,6 +25,9 @@ def settings():
     rows=q('market_settings').select('referral_monthly_reward_cap,referral_qualification_charge,referral_reward_rate').eq('id',1).limit(1).execute().data or []
     return rows[0] if rows else {'referral_monthly_reward_cap':100000,'referral_qualification_charge':10000,'referral_reward_rate':2.0}
 
+class ReferralCodeCreate(BaseModel):
+    code:str
+
 @app.get('/v1/referrals/me')
 def referral_me(user=Depends(auth)):
     code_rows=q('npay_referral_codes').select('*').eq('user_id',user).limit(1).execute().data or [];code=code_rows[0]['code'] if code_rows else None
@@ -31,17 +35,23 @@ def referral_me(user=Depends(auth)):
     month_start=current_month_start_utc();month_refs=[x for x in refs if x.get('qualified_at') and str(x.get('qualified_at'))>=month_start];valid_refs=[x for x in refs if x.get('qualified_at')]
     rewards=q('npay_referral_rewards').select('reward_amount,source_type,created_at').eq('referrer_user_id',user).eq('source_type','CHARGE').order('created_at',desc=True).limit(5000).execute().data or []
     total_reward=sum(int(x.get('reward_amount') or 0) for x in rewards);month_reward=sum(int(x.get('reward_amount') or 0) for x in rewards if str(x.get('created_at') or '')>=month_start);s=settings()
-    return {'code':code,'total_referrals':len(refs),'valid_referrals':len(valid_refs),'monthly_referrals':len(month_refs),'total_reward':total_reward,'monthly_reward':month_reward,'reward_rate_percent':float(s.get('referral_reward_rate') or 2.0),'reward_basis':'APPROVED_CHARGE_ONLY','qualification_charge':int(s.get('referral_qualification_charge') or 10000),'monthly_reward_cap_per_referred':int(s.get('referral_monthly_reward_cap') or 100000)}
+    return {'code':code,'total_referrals':len(refs),'valid_referrals':len(valid_refs),'monthly_referrals':len(month_refs),'total_reward':total_reward,'monthly_reward':month_reward,'reward_rate_percent':float(s.get('referral_reward_rate') or 2.0),'reward_basis':'APPROVED_CHARGE_ONLY','qualification_charge':int(s.get('referral_qualification_charge') or 10000),'monthly_reward_cap_per_referred':int(s.get('referral_monthly_reward_cap') or 100000),'code_rule':'4~10자 영문/숫자'}
 
 @app.post('/v1/referrals/code')
-def issue_referral_code(user=Depends(auth)):
+def issue_referral_code(p:ReferralCodeCreate,user=Depends(auth)):
     old=q('npay_referral_codes').select('code').eq('user_id',user).limit(1).execute().data or []
-    if old:return {'code':old[0]['code']}
-    for _ in range(30):
-        code='NP'+secrets.token_hex(4).upper()
-        if not (q('npay_referral_codes').select('code').eq('code',code).limit(1).execute().data or []):
-            q('npay_referral_codes').insert({'user_id':user,'code':code}).execute();return {'code':code}
-    raise HTTPException(500,'REFERRAL_CODE_GENERATION_FAILED')
+    if old:return {'code':old[0]['code'],'already_exists':True}
+    code=re.sub(r'\s+','',str(p.code or '')).upper()
+    if not re.fullmatch(r'[A-Z0-9]{4,10}',code):
+        raise HTTPException(400,'REFERRAL_CODE_4_TO_10_ALNUM')
+    used=q('npay_referral_codes').select('user_id').eq('code',code).limit(1).execute().data or []
+    if used:raise HTTPException(409,'REFERRAL_CODE_ALREADY_USED')
+    try:
+        q('npay_referral_codes').insert({'user_id':user,'code':code}).execute()
+        return {'code':code,'already_exists':False}
+    except Exception as e:
+        if 'duplicate' in str(e).lower() or 'unique' in str(e).lower():raise HTTPException(409,'REFERRAL_CODE_ALREADY_USED')
+        raise HTTPException(400,str(e)[:300])
 
 @app.get('/v1/referrals/leaderboard')
 def referral_leaderboard(user=Depends(auth)):
