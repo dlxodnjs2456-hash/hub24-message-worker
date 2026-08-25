@@ -1,4 +1,7 @@
 import asyncio
+import csv
+import io
+import re
 from datetime import datetime, timezone
 import httpx
 from fastapi import Depends, HTTPException
@@ -15,13 +18,52 @@ def one(table, **eq):
     for k,v in eq.items(): x=x.eq(k,v)
     rows=x.limit(1).execute().data or []
     return rows[0] if rows else None
+
+def now_iso(): return datetime.now(timezone.utc).isoformat()
+
 def is_admin(uid):
     try:
         r=db.sb.auth.admin.get_user_by_id(uid);meta=(getattr(r.user,'app_metadata',None) or {}) if r and r.user else {};return meta.get('role')=='admin'
     except Exception:return False
 
 class AddressAdd(BaseModel): address:str
-class UsdtSettings(BaseModel): usdt_krw_rate:float;usdt_autocharge_enabled:bool=True
+class UsdtSettings(BaseModel): usdt_autocharge_enabled:bool=True
+
+def parse_google_rate(text:str):
+    rows=list(csv.reader(io.StringIO(text or '')))
+    for row in rows:
+        for cell in row:
+            raw=str(cell or '').strip().replace(',','')
+            m=re.search(r'([0-9]+(?:\.[0-9]+)?)',raw)
+            if not m: continue
+            try:
+                value=float(m.group(1))
+                if 500 <= value <= 3000:
+                    return value
+            except Exception:
+                pass
+    raise ValueError('GOOGLE_RATE_NOT_FOUND')
+
+async def refresh_google_rate(client=None):
+    s=one('market_settings',id=1) or {}
+    if str(s.get('usdt_fx_source') or '').upper()!='GOOGLE_SHEET':
+        return float(s.get('usdt_krw_rate') or 0)
+    url=str(s.get('usdt_fx_csv_url') or '').strip()
+    if not url:
+        return float(s.get('usdt_krw_rate') or 0)
+    own_client=client is None
+    c=client or httpx.AsyncClient()
+    try:
+        r=await c.get(url,timeout=15,follow_redirects=True,headers={'User-Agent':'Mozilla/5.0 NPay-FX/1.0'})
+        r.raise_for_status()
+        rate=parse_google_rate(r.text)
+        q('market_settings').update({'usdt_krw_rate':rate,'usdt_fx_last_updated_at':now_iso(),'usdt_fx_last_error':None}).eq('id',1).execute()
+        return rate
+    except Exception as e:
+        q('market_settings').update({'usdt_fx_last_error':str(e)[:300]}).eq('id',1).execute()
+        return float(s.get('usdt_krw_rate') or 0)
+    finally:
+        if own_client: await c.aclose()
 
 @app.get('/v1/wallet/usdt-autocharge')
 def usdt_autocharge_info(user=Depends(auth)):
@@ -29,13 +71,21 @@ def usdt_autocharge_info(user=Depends(auth)):
     try:address=db.sb.rpc('npay_assign_usdt_address',{'p_user':user}).execute().data
     except Exception:pass
     deposits=q('npay_usdt_deposits').select('*').eq('user_id',user).order('detected_at',desc=True).limit(30).execute().data or []
-    return {'enabled':bool(s.get('usdt_autocharge_enabled',True)),'address':address,'network':'TRON (TRC20)','token':'USDT','krw_rate':float(s.get('usdt_krw_rate') or 0),'deposits':deposits}
+    return {'enabled':bool(s.get('usdt_autocharge_enabled',True)),'address':address,'network':'TRON (TRC20)','token':'USDT','krw_rate':float(s.get('usdt_krw_rate') or 0),'rate_source':s.get('usdt_fx_source') or 'MANUAL','rate_updated_at':s.get('usdt_fx_last_updated_at'),'deposits':deposits}
 
 @app.get('/v1/admin/usdt-autocharge')
 def admin_usdt_autocharge(user=Depends(auth)):
     if not is_admin(user):raise HTTPException(403,'ADMIN_REQUIRED')
     s=one('market_settings',id=1) or {};addresses=q('npay_usdt_deposit_addresses').select('*').order('id').limit(1000).execute().data or [];deposits=q('npay_usdt_deposits').select('*').order('detected_at',desc=True).limit(200).execute().data or []
-    return {'settings':{'usdt_krw_rate':float(s.get('usdt_krw_rate') or 0),'usdt_autocharge_enabled':bool(s.get('usdt_autocharge_enabled',True))},'addresses':addresses,'deposits':deposits}
+    return {'settings':{'usdt_krw_rate':float(s.get('usdt_krw_rate') or 0),'usdt_autocharge_enabled':bool(s.get('usdt_autocharge_enabled',True)),'usdt_fx_source':s.get('usdt_fx_source') or 'MANUAL','usdt_fx_last_updated_at':s.get('usdt_fx_last_updated_at'),'usdt_fx_last_error':s.get('usdt_fx_last_error')},'addresses':addresses,'deposits':deposits}
+
+@app.post('/v1/admin/usdt-autocharge/refresh-rate')
+async def admin_refresh_usdt_rate(user=Depends(auth)):
+    if not is_admin(user):raise HTTPException(403,'ADMIN_REQUIRED')
+    rate=await refresh_google_rate()
+    if rate<=0: raise HTTPException(502,'GOOGLE_RATE_REFRESH_FAILED')
+    s=one('market_settings',id=1) or {}
+    return {'ok':True,'usdt_krw_rate':rate,'updated_at':s.get('usdt_fx_last_updated_at'),'error':s.get('usdt_fx_last_error')}
 
 @app.post('/v1/admin/usdt-autocharge/addresses')
 def admin_add_usdt_address(p:AddressAdd,user=Depends(auth)):
@@ -48,8 +98,7 @@ def admin_add_usdt_address(p:AddressAdd,user=Depends(auth)):
 @app.put('/v1/admin/usdt-autocharge/settings')
 def admin_usdt_settings(p:UsdtSettings,user=Depends(auth)):
     if not is_admin(user):raise HTTPException(403,'ADMIN_REQUIRED')
-    if p.usdt_krw_rate<=0:raise HTTPException(400,'INVALID_USDT_KRW_RATE')
-    rows=q('market_settings').update({'usdt_krw_rate':p.usdt_krw_rate,'usdt_autocharge_enabled':p.usdt_autocharge_enabled}).eq('id',1).execute().data or []
+    rows=q('market_settings').update({'usdt_autocharge_enabled':p.usdt_autocharge_enabled,'usdt_fx_source':'GOOGLE_SHEET'}).eq('id',1).execute().data or []
     return rows[0] if rows else {'ok':True}
 
 async def scan_address(client,row,rate):
@@ -84,9 +133,15 @@ async def scan_address(client,row,rate):
 
 async def autocharge_loop():
     await asyncio.sleep(8)
+    last_fx_refresh=0.0
+    loop=asyncio.get_running_loop()
     async with httpx.AsyncClient() as client:
         while True:
             try:
+                now=loop.time()
+                if now-last_fx_refresh>=300:
+                    await refresh_google_rate(client)
+                    last_fx_refresh=now
                 s=one('market_settings',id=1) or {};rate=float(s.get('usdt_krw_rate') or 0)
                 if s.get('usdt_autocharge_enabled',True) and rate>0:
                     rows=q('npay_usdt_deposit_addresses').select('*').eq('is_active',True).limit(500).execute().data or []
