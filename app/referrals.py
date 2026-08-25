@@ -21,17 +21,17 @@ def user_name(uid):
 def current_month_start_utc():
     tz=ZoneInfo('Asia/Seoul');now=datetime.now(tz);start=now.replace(day=1,hour=0,minute=0,second=0,microsecond=0);return start.astimezone(timezone.utc).isoformat()
 def settings():
-    rows=q('market_settings').select('referral_monthly_reward_cap,referral_qualification_charge').eq('id',1).limit(1).execute().data or []
-    return rows[0] if rows else {'referral_monthly_reward_cap':100000,'referral_qualification_charge':10000}
+    rows=q('market_settings').select('referral_monthly_reward_cap,referral_qualification_charge,referral_reward_rate').eq('id',1).limit(1).execute().data or []
+    return rows[0] if rows else {'referral_monthly_reward_cap':100000,'referral_qualification_charge':10000,'referral_reward_rate':2.0}
 
 @app.get('/v1/referrals/me')
 def referral_me(user=Depends(auth)):
     code_rows=q('npay_referral_codes').select('*').eq('user_id',user).limit(1).execute().data or [];code=code_rows[0]['code'] if code_rows else None
     refs=q('npay_referrals').select('referred_user_id,created_at,qualified_at').eq('referrer_user_id',user).order('created_at',desc=True).limit(5000).execute().data or []
     month_start=current_month_start_utc();month_refs=[x for x in refs if x.get('qualified_at') and str(x.get('qualified_at'))>=month_start];valid_refs=[x for x in refs if x.get('qualified_at')]
-    rewards=q('npay_referral_rewards').select('reward_amount,source_type,created_at').eq('referrer_user_id',user).order('created_at',desc=True).limit(5000).execute().data or []
+    rewards=q('npay_referral_rewards').select('reward_amount,source_type,created_at').eq('referrer_user_id',user).eq('source_type','CHARGE').order('created_at',desc=True).limit(5000).execute().data or []
     total_reward=sum(int(x.get('reward_amount') or 0) for x in rewards);month_reward=sum(int(x.get('reward_amount') or 0) for x in rewards if str(x.get('created_at') or '')>=month_start);s=settings()
-    return {'code':code,'total_referrals':len(refs),'valid_referrals':len(valid_refs),'monthly_referrals':len(month_refs),'total_reward':total_reward,'monthly_reward':month_reward,'reward_rate_percent':1,'qualification_charge':int(s.get('referral_qualification_charge') or 10000),'monthly_reward_cap_per_referred':int(s.get('referral_monthly_reward_cap') or 100000)}
+    return {'code':code,'total_referrals':len(refs),'valid_referrals':len(valid_refs),'monthly_referrals':len(month_refs),'total_reward':total_reward,'monthly_reward':month_reward,'reward_rate_percent':float(s.get('referral_reward_rate') or 2.0),'reward_basis':'APPROVED_CHARGE_ONLY','qualification_charge':int(s.get('referral_qualification_charge') or 10000),'monthly_reward_cap_per_referred':int(s.get('referral_monthly_reward_cap') or 100000)}
 
 @app.post('/v1/referrals/code')
 def issue_referral_code(user=Depends(auth)):
@@ -48,9 +48,9 @@ def referral_leaderboard(user=Depends(auth)):
     month_start=current_month_start_utc();rows=q('npay_referrals').select('referrer_user_id,qualified_at').gte('qualified_at',month_start).limit(10000).execute().data or [];counts={}
     for r in rows:
         uid=str(r.get('referrer_user_id'));counts[uid]=counts.get(uid,0)+1
-    reward_rows=q('npay_referral_rewards').select('referrer_user_id,reward_amount,created_at').gte('created_at',month_start).limit(10000).execute().data or [];rewards={}
+    reward_rows=q('npay_referral_rewards').select('referrer_user_id,reward_amount,created_at').eq('source_type','CHARGE').gte('created_at',month_start).limit(10000).execute().data or [];rewards={}
     for r in reward_rows:
         uid=str(r.get('referrer_user_id'));rewards[uid]=rewards.get(uid,0)+int(r.get('reward_amount') or 0)
     ranked=sorted(counts.items(),key=lambda x:(-x[1],-rewards.get(x[0],0),x[0]))[:50];items=[]
     for idx,(uid,count) in enumerate(ranked,1):items.append({'rank':idx,'user_id':uid,'name':user_name(uid),'referral_count':count,'reward_amount':rewards.get(uid,0),'is_me':uid==str(user)})
-    return {'month':datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y-%m'),'items':items,'king':items[0] if items else None,'qualification':'첫 승인 충전 기준을 충족한 추천회원만 집계'}
+    return {'month':datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y-%m'),'items':items,'king':items[0] if items else None,'qualification':'첫 승인 입금 기준을 충족한 추천회원만 집계'}
