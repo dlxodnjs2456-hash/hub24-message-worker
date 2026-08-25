@@ -18,3 +18,5 @@ services:
         sync: false
       - key: HUB24_CORS_ORIGINS
         sync: false
+      - key: HUB24_TRONGRID_API_KEY
+        sync: false
