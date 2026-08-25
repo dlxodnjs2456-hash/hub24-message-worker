@@ -12,9 +12,14 @@ class Settings(BaseSettings):
     check_api_endpoint:str=''
     check_api_key:str=''
     check_api_secret:str=''
-    check_api_auth_type:str='BEARER'
-    check_api_timeout_seconds:int=20
+    check_api_auth_type:str='TOKEN'
+    check_api_timeout_seconds:int=30
     check_api_rate_limit_per_minute:int=20
+    check_api_country:str='KR'
+    check_api_filter_type:str='1'
+    check_api_poll_interval_seconds:int=5
+    check_api_max_wait_seconds:int=900
+    check_api_batch_size:int=5000
     model_config=SettingsConfigDict(env_prefix='HUB24_',env_file='.env',extra='ignore')
 
 settings=Settings()
