@@ -60,7 +60,11 @@ def send_broadcast(p:BroadcastPayload,user=Depends(auth)):
     title=(p.title or '').strip(); message=(p.message or '').strip(); link=(p.link_url or '').strip() or None
     if target not in ('ALL','USER'): raise HTTPException(400,'INVALID_TARGET_TYPE')
     if not title or not message: raise HTTPException(400,'TITLE_MESSAGE_REQUIRED')
+    if len(title)>120 or len(message)>4000: raise HTTPException(400,'BROADCAST_TOO_LONG')
+    if link and not (link.startswith('/') or link.startswith('https://') or link.startswith('http://') or link.startswith('tg://')):
+        raise HTTPException(400,'INVALID_LINK_URL')
     if target=='USER' and not p.target_user_id: raise HTTPException(400,'TARGET_USER_REQUIRED')
+
     targets=[]
     if target=='USER':
         try:
@@ -77,12 +81,23 @@ def send_broadcast(p:BroadcastPayload,user=Depends(auth)):
             targets.extend([str(getattr(u,'id')) for u in users if getattr(u,'id',None)])
             if len(users)<1000: break
             page+=1
+
     delivered=0
-    for uid in targets:
+    for start in range(0,len(targets),500):
+        batch=targets[start:start+500]
+        payload=[{'user_id':uid,'notification_type':'ADMIN_NOTICE','title':title,'message':message,'link_url':link} for uid in batch]
+        if not payload: continue
         try:
-            q('user_notifications').insert({'user_id':uid,'notification_type':'ADMIN_NOTICE','title':title,'message':message,'link_url':link}).execute(); delivered+=1
+            rows=q('user_notifications').insert(payload).execute().data or []
+            delivered+=len(rows) if rows else len(payload)
         except Exception:
-            pass
+            # Isolate a bad user row without losing the entire broadcast batch.
+            for row in payload:
+                try:
+                    q('user_notifications').insert(row).execute();delivered+=1
+                except Exception:
+                    pass
+
     row=q('admin_broadcasts').insert({'admin_user_id':user,'target_type':target,'target_user_id':p.target_user_id if target=='USER' else None,'title':title,'message':message,'link_url':link,'delivered_count':delivered}).execute().data
     q('admin_logs').insert({'admin_user_id':user,'action':'ADMIN_BROADCAST_SEND','target_type':'broadcast','target_id':str((row or [{}])[0].get('id') or ''),'detail':{'target_type':target,'target_user_id':p.target_user_id,'delivered_count':delivered,'title':title}}).execute()
     return {'ok':True,'delivered_count':delivered}
