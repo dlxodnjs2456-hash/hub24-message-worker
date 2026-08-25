@@ -5,31 +5,25 @@ from . import db
 
 
 def q(table): return db.sb.table(table)
-
 def one(table, **eq):
     x=q(table).select('*')
     for k,v in eq.items(): x=x.eq(k,v)
     rows=x.limit(1).execute().data or []
     return rows[0] if rows else None
-
 def is_admin(uid):
     try:
         r=db.sb.auth.admin.get_user_by_id(uid);meta=(getattr(r.user,'app_metadata',None) or {}) if r and r.user else {};return meta.get('role')=='admin'
     except Exception:return False
-
 def require_admin(uid):
     if not is_admin(uid):raise HTTPException(403,'ADMIN_REQUIRED')
-
 def audit(uid,action,target_type=None,target_id=None,detail=None):
     try:q('admin_logs').insert({'admin_user_id':uid,'action':action,'target_type':target_type,'target_id':str(target_id) if target_id is not None else None,'detail':detail or {}}).execute()
     except Exception:pass
 
-class EvidenceCreate(BaseModel):
-    evidence_type:str='TEXT';content:str|None=None;file_url:str|None=None
-class WithdrawalCreateV2(BaseModel):
-    amount:int;payout_method:str;payout_details:str;user_note:str|None=None
-class WithdrawalResolveV2(BaseModel):
-    action:str;admin_reference:str|None=None;admin_note:str|None=None
+class EvidenceCreate(BaseModel): evidence_type:str='TEXT';content:str|None=None;file_url:str|None=None
+class WithdrawalCreateV2(BaseModel): amount:int;payout_method:str;payout_details:str;user_note:str|None=None
+class WithdrawalResolveV2(BaseModel): action:str;admin_reference:str|None=None;admin_note:str|None=None
+class ReferralSettings(BaseModel): referral_qualification_charge:int;referral_monthly_reward_cap:int
 
 @app.get('/v1/notifications')
 def notifications(user=Depends(auth)):
@@ -68,11 +62,18 @@ def resolve_withdrawal_v2(wid:int,p:WithdrawalResolveV2|str,user=Depends(auth)):
     if isinstance(p,str):action=p.upper();reference=None;note=None
     else:action=p.action.upper();reference=p.admin_reference;note=p.admin_note
     if action=='PAID':q('withdrawal_requests').update({'status':'PAID','admin_reference':reference,'admin_note':note,'processed_at':now_iso(),'updated_at':now_iso()}).eq('id',wid).execute()
-    elif action=='REJECT':
-        db.sb.rpc('hub24_reject_withdrawal',{'p_request_id':wid}).execute();q('withdrawal_requests').update({'admin_note':note,'processed_at':now_iso(),'updated_at':now_iso()}).eq('id',wid).execute()
+    elif action=='REJECT':db.sb.rpc('hub24_reject_withdrawal',{'p_request_id':wid}).execute();q('withdrawal_requests').update({'admin_note':note,'processed_at':now_iso(),'updated_at':now_iso()}).eq('id',wid).execute()
     else:raise HTTPException(400,'INVALID_ACTION')
     audit(user,'WITHDRAWAL_'+action,'withdrawal',wid,{'reference':reference,'note':note});return {'ok':True,'status':'PAID' if action=='PAID' else 'REJECTED'}
 
+@app.get('/v1/admin/referral-settings')
+def get_referral_settings(user=Depends(auth)):
+    require_admin(user);s=one('market_settings',id=1) or {};return {'referral_qualification_charge':int(s.get('referral_qualification_charge') or 10000),'referral_monthly_reward_cap':int(s.get('referral_monthly_reward_cap') or 100000)}
+@app.put('/v1/admin/referral-settings')
+def put_referral_settings(p:ReferralSettings,user=Depends(auth)):
+    require_admin(user)
+    if p.referral_qualification_charge<0 or p.referral_monthly_reward_cap<0:raise HTTPException(400,'INVALID_REFERRAL_SETTINGS')
+    q('market_settings').update({'referral_qualification_charge':p.referral_qualification_charge,'referral_monthly_reward_cap':p.referral_monthly_reward_cap,'updated_at':now_iso()}).eq('id',1).execute();audit(user,'REFERRAL_SETTINGS_CHANGE','market_settings',1,p.model_dump());return {'ok':True,**p.model_dump()}
 @app.get('/v1/admin/logs')
 def admin_logs(user=Depends(auth)):
     require_admin(user);return {'items':q('admin_logs').select('*').order('created_at',desc=True).limit(500).execute().data or []}
