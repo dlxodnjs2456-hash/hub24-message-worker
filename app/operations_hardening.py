@@ -14,9 +14,7 @@ def one(table, **eq):
 
 def is_admin(uid):
     try:
-        r=db.sb.auth.admin.get_user_by_id(uid)
-        meta=(getattr(r.user,'app_metadata',None) or {}) if r and r.user else {}
-        return meta.get('role')=='admin'
+        r=db.sb.auth.admin.get_user_by_id(uid);meta=(getattr(r.user,'app_metadata',None) or {}) if r and r.user else {};return meta.get('role')=='admin'
     except Exception:return False
 
 def require_admin(uid):
@@ -27,23 +25,15 @@ def audit(uid,action,target_type=None,target_id=None,detail=None):
     except Exception:pass
 
 class EvidenceCreate(BaseModel):
-    evidence_type:str='TEXT'
-    content:str|None=None
-    file_url:str|None=None
+    evidence_type:str='TEXT';content:str|None=None;file_url:str|None=None
 class WithdrawalCreateV2(BaseModel):
-    amount:int
-    payout_method:str
-    payout_details:str
-    user_note:str|None=None
+    amount:int;payout_method:str;payout_details:str;user_note:str|None=None
 class WithdrawalResolveV2(BaseModel):
-    action:str
-    admin_reference:str|None=None
-    admin_note:str|None=None
+    action:str;admin_reference:str|None=None;admin_note:str|None=None
 
 @app.get('/v1/notifications')
 def notifications(user=Depends(auth)):
-    items=q('user_notifications').select('*').eq('user_id',user).order('created_at',desc=True).limit(100).execute().data or []
-    return {'items':items,'unread_count':sum(1 for x in items if not x.get('is_read'))}
+    items=q('user_notifications').select('*').eq('user_id',user).order('created_at',desc=True).limit(100).execute().data or [];return {'items':items,'unread_count':sum(1 for x in items if not x.get('is_read'))}
 @app.post('/v1/notifications/{nid}/read')
 def notification_read(nid:int,user=Depends(auth)):
     q('user_notifications').update({'is_read':True}).eq('id',nid).eq('user_id',user).execute();return {'ok':True}
@@ -55,9 +45,7 @@ def notifications_read_all(user=Depends(auth)):
 def withdrawal_v2(p:WithdrawalCreateV2,user=Depends(auth)):
     if p.amount<=0:raise HTTPException(400,'INVALID_AMOUNT')
     if not p.payout_method.strip() or not p.payout_details.strip():raise HTTPException(400,'PAYOUT_INFO_REQUIRED')
-    try:
-        rid=db.sb.rpc('hub24_request_withdrawal_v2',{'p_user':user,'p_amount':p.amount,'p_method':p.payout_method,'p_details':p.payout_details,'p_note':p.user_note}).execute().data
-        return {'ok':True,'id':rid}
+    try:return {'ok':True,'id':db.sb.rpc('hub24_request_withdrawal_v2',{'p_user':user,'p_amount':p.amount,'p_method':p.payout_method,'p_details':p.payout_details,'p_note':p.user_note}).execute().data}
     except Exception as e:raise HTTPException(400,str(e))
 
 @app.get('/v1/market/trades/{tid}/evidence')
@@ -74,15 +62,16 @@ def add_trade_evidence(tid:int,p:EvidenceCreate,user=Depends(auth)):
     return q('trade_dispute_evidence').insert({'trade_id':tid,'user_id':user,'evidence_type':p.evidence_type.upper(),'content':p.content.strip() if p.content else None,'file_url':p.file_url}).execute().data[0]
 
 @app.post('/v1/admin/market/withdrawals/{wid}/resolve-v2')
-def resolve_withdrawal_v2(wid:int,p:WithdrawalResolveV2,user=Depends(auth)):
+def resolve_withdrawal_v2(wid:int,p:WithdrawalResolveV2|str,user=Depends(auth)):
     require_admin(user);r=one('withdrawal_requests',id=wid)
     if not r or r.get('status')!='PENDING':raise HTTPException(409,'INVALID_WITHDRAWAL')
-    action=p.action.upper()
-    if action=='PAID':q('withdrawal_requests').update({'status':'PAID','admin_reference':p.admin_reference,'admin_note':p.admin_note,'processed_at':now_iso(),'updated_at':now_iso()}).eq('id',wid).execute()
+    if isinstance(p,str):action=p.upper();reference=None;note=None
+    else:action=p.action.upper();reference=p.admin_reference;note=p.admin_note
+    if action=='PAID':q('withdrawal_requests').update({'status':'PAID','admin_reference':reference,'admin_note':note,'processed_at':now_iso(),'updated_at':now_iso()}).eq('id',wid).execute()
     elif action=='REJECT':
-        db.sb.rpc('hub24_reject_withdrawal',{'p_request_id':wid}).execute();q('withdrawal_requests').update({'admin_note':p.admin_note,'processed_at':now_iso(),'updated_at':now_iso()}).eq('id',wid).execute()
+        db.sb.rpc('hub24_reject_withdrawal',{'p_request_id':wid}).execute();q('withdrawal_requests').update({'admin_note':note,'processed_at':now_iso(),'updated_at':now_iso()}).eq('id',wid).execute()
     else:raise HTTPException(400,'INVALID_ACTION')
-    audit(user,'WITHDRAWAL_'+action,'withdrawal',wid,{'reference':p.admin_reference,'note':p.admin_note});return {'ok':True,'status':'PAID' if action=='PAID' else 'REJECTED'}
+    audit(user,'WITHDRAWAL_'+action,'withdrawal',wid,{'reference':reference,'note':note});return {'ok':True,'status':'PAID' if action=='PAID' else 'REJECTED'}
 
 @app.get('/v1/admin/logs')
 def admin_logs(user=Depends(auth)):
