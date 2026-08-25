@@ -1,6 +1,7 @@
 from .main import app
 from . import db
 from .settings import settings
+from . import management  # registers extended management routes
 
 @app.get('/health/db')
 def health_db():
