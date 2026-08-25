@@ -9,13 +9,14 @@ from . import market_vip  # registers VIP seller / banners / image-required prod
 from . import community  # registers community boards / comments / cooldowns
 from . import banner_slots  # registers paid banner slot ownership and editing
 from . import referrals  # registers referral codes / rewards / monthly leaderboard
+from . import operations_hardening  # notifications / disputes / admin audit / detailed withdrawals
 
 @app.get('/health/db')
 def health_db():
     result = {
         'ok': True,
         'service': 'hub24-worker',
-        'version': '5.6.0',
+        'version': '5.7.0',
         'supabase_url_set': bool(settings.supabase_url),
         'service_role_set': bool(settings.supabase_service_role_key),
         'db_ok': False,
@@ -33,11 +34,12 @@ def health_management():
     return {
         'ok': True,
         'service': 'hub24-worker',
-        'version': '5.6.0',
+        'version': '5.7.0',
         'management_routes': True,
         'marketplace_routes': True,
         'vip_market_routes': True,
         'community_routes': True,
         'banner_slot_routes': True,
         'referral_routes': True,
+        'operations_hardening_routes': True,
     }
