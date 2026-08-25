@@ -91,7 +91,12 @@ def create_product_v2(p: ProductCreateV2, user=Depends(auth)):
         'image_url': p.image_url,
         'status': 'ACTIVE',
     }
-    return q('market_products').insert(payload).execute().data[0]
+    try:
+        return q('market_products').insert(payload).execute().data[0]
+    except Exception as e:
+        if 'SELLER_POST_COOLDOWN_24H' in str(e):
+            raise HTTPException(429, 'SELLER_POST_COOLDOWN_24H')
+        raise HTTPException(400, str(e))
 
 
 @app.post('/v1/market/seller/vip')
