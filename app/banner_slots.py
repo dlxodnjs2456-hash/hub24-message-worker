@@ -68,7 +68,7 @@ def banner_slots(user=Depends(auth)):
             'is_lifetime':bool(b and b.get('is_lifetime') and occupied),
             'plan_code':b.get('plan_code') if occupied else None,
         })
-    return {'items':items,'plans':[{'code':'1M','label':'1개월','price':1000000},{'code':'3M','label':'3개월','price':2700000},{'code':'6M','label':'6개월','price':5000000},{'code':'LIFETIME','label':'서비스 종료 시까지','price':10000000}], 'max_slots_per_user':2, 'image_guide':'권장 1200×360px (10:3), JPG/PNG/WebP, 최대 5MB'}
+    return {'items':items,'plans':[{'code':'1M','label':'1개월','price':1000000},{'code':'3M','label':'3개월','price':2700000},{'code':'6M','label':'6개월','price':5000000},{'code':'LIFETIME','label':'서비스 종료기한 없음','price':10000000}], 'max_slots_per_user':2, 'image_guide':'권장 1200×360px (10:3), JPG/PNG/WebP, 최대 5MB'}
 
 
 @app.post('/v1/market/banner-slots/{slot}/purchase')
