@@ -1,8 +1,12 @@
-from fastapi import Depends, HTTPException
+from pathlib import Path
+
+from fastapi import Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
+from telethon import TelegramClient
 
 from . import db
 from .security import enc
+from .settings import settings
 from .telegram import client_from_account
 from .main import app, auth, event, now_iso, recalc_job, _tasks
 
@@ -29,6 +33,73 @@ def _sync_batch_count(user: str, bid: str):
     rows = db.rows('contacts', user, eq={'batch_id': bid}, order=None)
     db.update('contact_batches', {'total_count': len(rows)}, eq={'id': bid, 'user_id': user})
     return len(rows)
+
+
+@app.post('/v1/accounts/sessions/upload')
+async def upload_sessions(
+    files: list[UploadFile] = File(...),
+    api_id: int = Form(...),
+    api_hash: str = Form(...),
+    user=Depends(auth),
+):
+    root = Path(settings.session_dir) / user / 'imports'
+    root.mkdir(parents=True, exist_ok=True)
+    results = []
+    existing = {
+        str(x.get('telegram_user_id'))
+        for x in db.rows('telegram_accounts', user, order=None)
+        if x.get('telegram_user_id') is not None
+    }
+    for idx, file in enumerate(files):
+        name = Path(file.filename or f'session-{idx}.session').name
+        if not name.lower().endswith('.session'):
+            results.append({'file': name, 'ok': False, 'error': 'SESSION_FILE_REQUIRED'})
+            continue
+        target = root / f'{now_iso().replace(":", "-")}-{idx}-{name}'
+        try:
+            target.write_bytes(await file.read())
+            c = TelegramClient(str(target), int(api_id), api_hash)
+            await c.connect()
+            try:
+                if not await c.is_user_authorized():
+                    raise RuntimeError('SESSION_NOT_AUTHORIZED')
+                me = await c.get_me()
+                if not me:
+                    raise RuntimeError('SESSION_USER_NOT_FOUND')
+            finally:
+                await c.disconnect()
+            uid = str(int(me.id))
+            if uid in existing:
+                target.unlink(missing_ok=True)
+                results.append({'file': name, 'ok': False, 'error': 'ACCOUNT_ALREADY_REGISTERED', 'telegram_user_id': uid})
+                continue
+            phone = getattr(me, 'phone', None) or ''
+            label = ('@' + me.username) if getattr(me, 'username', None) else (getattr(me, 'first_name', None) or phone or uid)
+            row = db.insert('telegram_accounts', {
+                'user_id': user,
+                'label': label,
+                'phone': phone,
+                'api_id': int(api_id),
+                'api_hash_enc': enc(api_hash),
+                'session_path': str(target),
+                'proxy_url_enc': None,
+                'status': 'READY',
+                'telegram_user_id': int(me.id),
+            })
+            existing.add(uid)
+            results.append({'file': name, 'ok': True, 'id': row.get('id') if row else None, 'label': label, 'telegram_user_id': uid})
+        except Exception as e:
+            try:
+                target.unlink(missing_ok=True)
+            except Exception:
+                pass
+            results.append({'file': name, 'ok': False, 'error': str(e)[:300]})
+    return {
+        'ok': True,
+        'success_count': sum(1 for x in results if x.get('ok')),
+        'failed_count': sum(1 for x in results if not x.get('ok')),
+        'items': results,
+    }
 
 
 @app.get('/v1/batches/{bid}/contacts')
@@ -128,7 +199,6 @@ def update_proxy(aid: str, p: ProxyUpdateRequest, user=Depends(auth)):
     db.update('telegram_accounts', {
         'proxy_url_enc': enc(value) if value else None,
         'last_check_at': None,
-        'updated_at': now_iso(),
     }, eq={'id': aid, 'user_id': user})
     return {'ok': True, 'proxy_enabled': bool(value)}
 
