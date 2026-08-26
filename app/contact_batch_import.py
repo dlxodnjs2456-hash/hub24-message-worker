@@ -1,4 +1,4 @@
-import asyncio, random
+import asyncio, random, re
 from pydantic import BaseModel, Field
 from fastapi import Depends, HTTPException
 from telethon.tl import functions
@@ -34,6 +34,17 @@ def _ready_accounts(user,ids):
 
 def _available_contacts(user,bid):
     return db.sb.table('contacts').select('*').eq('user_id',user).eq('batch_id',bid).is_('assigned_account_id','null').order('created_at').execute().data or []
+
+
+def _telegram_phone(v):
+    d=re.sub(r'\D','',str(v or ''))
+    if d.startswith('82'):
+        return '+'+d
+    if d.startswith('010'):
+        return '+82'+d[1:]
+    if d.startswith('10'):
+        return '+82'+d
+    return '+'+d if d else ''
 
 
 def _allocate(contacts,accounts,per_account):
@@ -102,7 +113,7 @@ async def _run_import(user,bid,account_ids,per_account):
                     cid=random.randrange(1,2**63)
                     while cid in mapping: cid=random.randrange(1,2**63)
                     mapping[cid]=item
-                    request.append(InputPhoneContact(client_id=cid,phone=item['phone'],first_name=f'N-{str(item["id"])[:8]}',last_name=''))
+                    request.append(InputPhoneContact(client_id=cid,phone=_telegram_phone(item['phone']),first_name=f'N-{str(item["id"])[:8]}',last_name=''))
                 try:
                     result=await c(functions.contacts.ImportContactsRequest(request))
                 except Exception as e:
