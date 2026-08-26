@@ -31,6 +31,16 @@ def _within(v,days):
 def _period_label(days):
     return '전체 활동 가입자' if int(days or 0)==0 else f'최근 {int(days)}일 활동 가입자'
 
+def _registered_for_period(rows,days):
+    registered=[x for x in rows if x.get('status')=='REGISTERED']
+    matched=[x for x in registered if _within(x.get('telegram_active'),days)]
+    # Some provider exports contain phone/UID/username only and omit the activity
+    # column because the provider-side task already returned the filtered set.
+    # Never return an empty detail/download solely because that optional column is absent.
+    if not matched and registered and all(_active_days(x.get('telegram_active')) is None for x in registered):
+        return registered, True
+    return matched, False
+
 @app.post('/v1/checker/upload')
 async def checker_upload_v2(file:UploadFile=File(...),activity_days:int=Form(0),user=Depends(auth)):
     if activity_days not in (0,1,3,7): raise HTTPException(400,'INVALID_ACTIVITY_PERIOD')
@@ -66,12 +76,13 @@ def checker_results_v2(jid:int,limit:int=200,user=Depends(auth)):
     if not job: raise HTTPException(404,'CHECKER_JOB_NOT_FOUND')
     days=int(job.get('activity_days') or 0)
     rows=q('npay_checker_items').select('id,row_no,phone,status,telegram_id,telegram_username,telegram_active,checked_at,error_code,error_message').eq('job_id',jid).eq('user_id',user).eq('status','REGISTERED').order('id').execute().data or []
-    rows=[x for x in rows if _within(x.get('telegram_active'),days)]
+    rows,fallback=_registered_for_period(rows,days)
     rows=rows[:min(limit,1000)]
     for x in rows:
         x['within_period']=True
         x['activity_period']=_period_label(days)
-    return {'items':rows,'activity_days':days,'activity_period':_period_label(days),'matched_count':len(rows)}
+        x['provider_filtered_fallback']=fallback
+    return {'items':rows,'activity_days':days,'activity_period':_period_label(days),'matched_count':len(rows),'provider_filtered_fallback':fallback}
 
 @app.get('/v1/checker/jobs/{jid}/download')
 def checker_download_v2(jid:int,filter:str='all',user=Depends(auth)):
@@ -79,13 +90,18 @@ def checker_download_v2(jid:int,filter:str='all',user=Depends(auth)):
     if not job: raise HTTPException(404,'CHECKER_JOB_NOT_FOUND')
     days=int(job.get('activity_days') or 0)
     rows=q('npay_checker_items').select('*').eq('job_id',jid).eq('user_id',user).order('telegram_active',desc=True,nullsfirst=False).execute().data or []
-    if filter=='registered': rows=[x for x in rows if x['status']=='REGISTERED' and _within(x.get('telegram_active'),days)]
+    fallback=False
+    if filter=='registered': rows,fallback=_registered_for_period(rows,days)
     elif filter=='unknown': rows=[x for x in rows if x['status'] in ('UNKNOWN','NOT_REGISTERED')]
     elif filter=='error': rows=[x for x in rows if x['status'] in ('API_ERROR','RATE_LIMITED','TIMEOUT')]
     wb=Workbook();ws=wb.active;ws.title='검수결과';ws.append(['전화번호','가입여부','텔레그램 UID','텔레그램 ID','텔레그램 접속일자','활동 기간'])
     labels={'REGISTERED':'가입 확인','NOT_REGISTERED':'미가입','UNKNOWN':'확인 불가','API_ERROR':'오류','RATE_LIMITED':'호출 제한','TIMEOUT':'시간 초과','WAITING':'대기'}
     for x in rows:
-        activity=_period_label(days) if x.get('status')=='REGISTERED' and _within(x.get('telegram_active'),days) else '-'
-        ws.append([x['phone'],labels.get(x['status'],x['status']),x.get('telegram_id'),x.get('telegram_username'),x.get('telegram_active'),activity])
+        matched=x.get('status')=='REGISTERED' and (_within(x.get('telegram_active'),days) or fallback)
+        activity=_period_label(days) if matched else '-'
+        active=x.get('telegram_active')
+        if matched and fallback and active in (None,'') and days==1:
+            active='0'
+        ws.append([x['phone'],labels.get(x['status'],x['status']),x.get('telegram_id'),x.get('telegram_username'),active,activity])
     bio=io.BytesIO();wb.save(bio);bio.seek(0);fn=f'npay_checker_{jid}_{filter}.xlsx'
     return StreamingResponse(bio,media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',headers={'Content-Disposition':f'attachment; filename="{fn}"'})
