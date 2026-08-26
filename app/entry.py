@@ -17,7 +17,7 @@ from . import admin_communications
 from . import public_referral
 from . import checker
 
-VERSION='5.13.7'
+VERSION='5.14.0'
 
 
 def _drop_route(path, method=None):
@@ -42,6 +42,8 @@ _drop_route('/v1/market/trades/{tid}/evidence','GET')
 _drop_route('/v1/market/trades/{tid}/evidence','POST')
 _drop_route('/v1/admin/market/trades/{tid}/evidence','GET')
 _drop_route('/v1/wallet/usdt-charge-requests/{rid}/verify','POST')
+# Replace automatic all-READY account assignment with explicit per-job selection.
+_drop_route('/v1/jobs','POST')
 # Checker UI hardening replaces these routes without touching the Telegram send engine.
 _drop_route('/v1/checker/upload','POST')
 _drop_route('/v1/checker/jobs','GET')
@@ -54,6 +56,7 @@ app.router.on_startup=[fn for fn in app.router.on_startup if getattr(fn,'__name_
 from . import stability_hardening
 from . import private_evidence
 from . import usdt_claim_hardening
+from . import job_assignment_hardening
 from . import checker_parser_hardening
 from . import checker_period_hardening
 from . import checker_recovery
@@ -72,4 +75,4 @@ def health_db():
 
 @app.get('/health/management')
 def health_management():
-    return {'ok':True,'service':'hub24-worker','version':VERSION,'management_routes':True,'marketplace_routes':True,'vip_market_routes':True,'community_routes':True,'banner_slot_routes':True,'referral_routes':True,'operations_hardening_routes':True,'banner_admin_hardening_routes':True,'usdt_autocharge_routes':True,'member_admin_routes':True,'admin_communications_routes':True,'public_referral_validation':True,'stability_hardening_routes':True,'private_evidence_routes':True,'usdt_claim_hardening_routes':True,'checker_routes':True,'checker_period_hardening':True,'checker_activity_parser_hardening':True,'checker_period_matched_only':True,'checker_activity_semantics':True,'checker_drafts_hidden':True,'checker_restart_recovery':True,'checker_atomic_finalize':True,'checker_provider_mode':'TASK_POLL_EXPORT','checker_api_configured':bool(settings.check_api_base_url and settings.check_api_key),'google_fx_auto_refresh':True,'usdt_verify_diagnostics':True,'legacy_manual_charge_routes':False,'legacy_withdrawal_route':False}
+    return {'ok':True,'service':'hub24-worker','version':VERSION,'management_routes':True,'marketplace_routes':True,'vip_market_routes':True,'community_routes':True,'banner_slot_routes':True,'referral_routes':True,'operations_hardening_routes':True,'banner_admin_hardening_routes':True,'usdt_autocharge_routes':True,'member_admin_routes':True,'admin_communications_routes':True,'public_referral_validation':True,'stability_hardening_routes':True,'private_evidence_routes':True,'usdt_claim_hardening_routes':True,'job_account_assignment_routes':True,'checker_routes':True,'checker_period_hardening':True,'checker_activity_parser_hardening':True,'checker_period_matched_only':True,'checker_activity_semantics':True,'checker_drafts_hidden':True,'checker_restart_recovery':True,'checker_atomic_finalize':True,'checker_provider_mode':'TASK_POLL_EXPORT','checker_api_configured':bool(settings.check_api_base_url and settings.check_api_key),'google_fx_auto_refresh':True,'usdt_verify_diagnostics':True,'legacy_manual_charge_routes':False,'legacy_withdrawal_route':False}
