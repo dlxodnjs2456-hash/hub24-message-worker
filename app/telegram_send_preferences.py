@@ -7,7 +7,7 @@ class SendPrefs(BaseModel):
     message_text:str=''
     button_text:str=''
     button_url:str=''
-    max_contacts_per_account:int=Field(default=50, ge=1, le=60)
+    max_contacts_per_account:int=Field(default=50, ge=1, le=1000)
 
 @app.get('/v1/telegram-send/preferences')
 def get_send_preferences(user=Depends(auth)):
