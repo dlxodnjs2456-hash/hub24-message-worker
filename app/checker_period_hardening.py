@@ -65,11 +65,12 @@ def checker_results_v2(jid:int,limit:int=200,user=Depends(auth)):
     job=q('npay_checker_jobs').select('activity_days').eq('id',jid).eq('user_id',user).maybe_single().execute().data
     if not job: raise HTTPException(404,'CHECKER_JOB_NOT_FOUND')
     days=int(job.get('activity_days') or 0)
-    rows=q('npay_checker_items').select('id,row_no,phone,status,telegram_id,telegram_username,telegram_active,checked_at,error_code,error_message').eq('job_id',jid).eq('user_id',user).order('id').limit(min(limit,1000)).execute().data or []
+    rows=q('npay_checker_items').select('id,row_no,phone,status,telegram_id,telegram_username,telegram_active,checked_at,error_code,error_message').eq('job_id',jid).eq('user_id',user).eq('status','REGISTERED').order('telegram_active',desc=True,nullsfirst=False).limit(min(limit,1000)).execute().data or []
+    rows=[x for x in rows if _within(x.get('telegram_active'),days)]
     for x in rows:
-        x['within_period']=x.get('status')=='REGISTERED' and _within(x.get('telegram_active'),days)
+        x['within_period']=True
         x['activity_period']=_period_label(days)
-    return {'items':rows,'activity_days':days,'activity_period':_period_label(days)}
+    return {'items':rows,'activity_days':days,'activity_period':_period_label(days),'matched_count':len(rows)}
 
 @app.get('/v1/checker/jobs/{jid}/download')
 def checker_download_v2(jid:int,filter:str='all',user=Depends(auth)):
@@ -83,8 +84,7 @@ def checker_download_v2(jid:int,filter:str='all',user=Depends(auth)):
     wb=Workbook();ws=wb.active;ws.title='검수결과';ws.append(['전화번호','가입여부','텔레그램 UID','텔레그램 ID','텔레그램 접속일자','활동 기간 분류'])
     labels={'REGISTERED':'가입 확인','NOT_REGISTERED':'미가입','UNKNOWN':'확인 불가','API_ERROR':'오류','RATE_LIMITED':'호출 제한','TIMEOUT':'시간 초과','WAITING':'대기'}
     for x in rows:
-        activity='-'
-        if x.get('status')=='REGISTERED': activity=_period_label(days) if _within(x.get('telegram_active'),days) else '선택 기간 외'
+        activity=_period_label(days) if x.get('status')=='REGISTERED' and _within(x.get('telegram_active'),days) else '-'
         ws.append([x['phone'],labels.get(x['status'],x['status']),x.get('telegram_id'),x.get('telegram_username'),x.get('telegram_active'),activity])
     bio=io.BytesIO();wb.save(bio);bio.seek(0);fn=f'npay_checker_{jid}_{filter}.xlsx'
     return StreamingResponse(bio,media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',headers={'Content-Disposition':f'attachment; filename="{fn}"'})
