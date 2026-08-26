@@ -32,6 +32,11 @@ def board_admin(uid):
     return user_info(uid).get('role') in ('admin','board_admin')
 
 
+def admin_only(uid):
+    if user_info(uid).get('role')!='admin':
+        raise HTTPException(403,'ADMIN_ONLY')
+
+
 def parse_dt(value):
     if not value: return None
     try: return datetime.fromisoformat(str(value).replace('Z','+00:00'))
@@ -60,6 +65,65 @@ class CommentCreate(BaseModel):
 
 class PinUpdate(BaseModel):
     is_pinned: bool
+
+class NoticeCreate(BaseModel):
+    title:str
+    content:str
+    is_active:bool=True
+    sort_order:int=0
+
+class NoticeUpdate(BaseModel):
+    title:str|None=None
+    content:str|None=None
+    is_active:bool|None=None
+    sort_order:int|None=None
+
+
+@app.get('/v1/community/notices')
+def community_notices(user=Depends(auth)):
+    rows=q('npay_global_notices').select('*').eq('is_active',True).order('sort_order',desc=True).order('created_at',desc=True).limit(30).execute().data or []
+    return {'items':rows}
+
+
+@app.get('/v1/admin/community/notices')
+def admin_community_notices(user=Depends(auth)):
+    admin_only(user)
+    rows=q('npay_global_notices').select('*').order('sort_order',desc=True).order('created_at',desc=True).limit(200).execute().data or []
+    return {'items':rows}
+
+
+@app.post('/v1/admin/community/notices')
+def create_community_notice(p:NoticeCreate,user=Depends(auth)):
+    admin_only(user)
+    title=p.title.strip();content=p.content.strip()
+    if not title or not content: raise HTTPException(400,'TITLE_CONTENT_REQUIRED')
+    row=q('npay_global_notices').insert({'title':title,'content':content,'is_active':bool(p.is_active),'sort_order':int(p.sort_order),'created_by':user,'updated_at':now_iso()}).execute().data[0]
+    return row
+
+
+@app.put('/v1/admin/community/notices/{nid}')
+def update_community_notice(nid:int,p:NoticeUpdate,user=Depends(auth)):
+    admin_only(user)
+    current=one('npay_global_notices',id=nid)
+    if not current: raise HTTPException(404,'NOTICE_NOT_FOUND')
+    data={'updated_at':now_iso()}
+    if p.title is not None:
+        if not p.title.strip(): raise HTTPException(400,'TITLE_REQUIRED')
+        data['title']=p.title.strip()
+    if p.content is not None:
+        if not p.content.strip(): raise HTTPException(400,'CONTENT_REQUIRED')
+        data['content']=p.content.strip()
+    if p.is_active is not None:data['is_active']=bool(p.is_active)
+    if p.sort_order is not None:data['sort_order']=int(p.sort_order)
+    rows=q('npay_global_notices').update(data).eq('id',nid).execute().data or []
+    return rows[0] if rows else {'ok':True}
+
+
+@app.delete('/v1/admin/community/notices/{nid}')
+def delete_community_notice(nid:int,user=Depends(auth)):
+    admin_only(user)
+    q('npay_global_notices').delete().eq('id',nid).execute()
+    return {'ok':True}
 
 
 @app.get('/v1/community/posts')
