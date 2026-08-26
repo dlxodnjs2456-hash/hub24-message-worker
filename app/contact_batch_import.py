@@ -1,129 +1,115 @@
 import asyncio, random
+from pydantic import BaseModel, Field
+from fastapi import Depends, HTTPException
 from telethon.tl import functions
 from telethon.tl.types import InputPhoneContact
 
-from . import main as base
+from .main import app, auth, now_iso
 from . import db
-from .security import dec
-from .telegram import client_from_account, prepare_source, is_rate_error
+from .telegram import client_from_account, is_rate_error
 
 BATCH_SIZE=10
+_import_tasks={}
 
-async def _import_waiting_batch(user,jid,aid,client):
-    rows=db.rows('job_targets',user,eq={'job_id':jid,'state':'WAITING','assigned_account_id':int(aid)},order='created_at',limit=50)
-    batch=[]
-    for t in rows:
-        if t.get('telegram_user_id'):
-            continue
-        batch.append(t)
-        if len(batch)>=BATCH_SIZE:
-            break
-    if not batch:
-        return False
+class ContactImportStart(BaseModel):
+    account_ids:list[int]=Field(default_factory=list)
+    max_contacts_per_account:int=Field(default=50, ge=1, le=60)
 
-    contacts=[];client_to_target={}
-    for t in batch:
-        cid=random.randrange(1,2**63)
-        while cid in client_to_target:
-            cid=random.randrange(1,2**63)
-        client_to_target[cid]=t
-        contacts.append(InputPhoneContact(client_id=cid,phone=t['phone'],first_name=f'H24-{str(t["id"])[:8]}',last_name=''))
-        db.update('job_targets',{'stage':f'연락처 {len(batch)}개 묶음 추가','updated_at':base.now_iso()},eq={'id':t['id'],'user_id':user})
 
-    base.event(user,jid,'INFO','CONTACT_BATCH',f'연락처 {len(batch)}개 묶음 추가 시작',aid)
-    result=await client(functions.contacts.ImportContactsRequest(contacts))
-    imported={int(x.client_id):int(x.user_id) for x in (getattr(result,'imported',None) or [])}
+def _batch(user,bid):
+    row=db.one('contact_batches',user,eq={'id':bid})
+    if not row: raise HTTPException(404,'DB를 찾을 수 없습니다.')
+    return row
 
-    resolved=0;unresolved=0
-    for cid,t in client_to_target.items():
-        uid=imported.get(int(cid))
-        if uid:
-            resolved+=1
-            db.update('contacts',{'telegram_user_id':uid,'assigned_account_id':int(aid),'state':'RESOLVED','detail':'Telegram UID 확인'},eq={'id':t['contact_id'],'user_id':user})
-            db.update('job_targets',{'telegram_user_id':uid,'stage':'연락처 확인 완료','updated_at':base.now_iso()},eq={'id':t['id'],'user_id':user})
-        else:
-            unresolved+=1
-            db.update('job_targets',{'state':'FAILED','stage':'연락처 확인 실패','error_code':'CONTACT_NOT_RESOLVED','error_detail':'Telegram 사용자 확인 불가','updated_at':base.now_iso()},eq={'id':t['id'],'user_id':user})
-            base.event(user,jid,'ERROR','TARGET',f"{t['phone']} 연락처 확인 실패 / CONTACT_NOT_RESOLVED",aid)
 
-    base.event(user,jid,'INFO','CONTACT_BATCH',f'연락처 묶음 처리 완료 / 요청 {len(batch)} / 확인 {resolved} / 미확인 {unresolved}',aid)
-    base.recalc_job(user,jid)
-    return True
+def _ready_accounts(user,ids):
+    rows=db.rows('telegram_accounts',user,eq={'status':'READY'},order='created_at')
+    by_id={int(x['id']):x for x in rows};selected=[]
+    for raw in ids:
+        aid=int(raw)
+        if aid in by_id and aid not in [int(x['id']) for x in selected]: selected.append(by_id[aid])
+    if not selected: raise HTTPException(400,'READY Telegram 계정을 1개 이상 선택하세요.')
+    return selected
 
-async def run_job_batched(user,jid):
-    job=db.one('jobs',user,eq={'id':jid})
-    accounts={str(a['id']):a for a in db.rows('telegram_accounts',user,order=None)}
-    stop=base._stops[jid];pause=base._pauses[jid];clients={};sources={}
-    db.update('jobs',{'status':'RUNNING','updated_at':base.now_iso()},eq={'id':jid,'user_id':user})
-    base.event(user,jid,'INFO','JOB',f'작업 시작 / 연락처 추가 {BATCH_SIZE}개 묶음 처리')
+
+def _allocate(contacts,accounts,per_account):
+    capacity=len(accounts)*per_account
+    if len(contacts)>capacity:
+        raise HTTPException(400,f'계정 처리용량 부족: DB {len(contacts)}건 / 현재 최대 {capacity}건. 계정을 추가하거나 계정당 최대 처리개수를 늘려주세요.')
+    allocations={int(a['id']):[] for a in accounts};idx=0
+    for a in accounts:
+        aid=int(a['id'])
+        for _ in range(per_account):
+            if idx>=len(contacts): break
+            allocations[aid].append(contacts[idx]);idx+=1
+    return allocations
+
+
+async def _run_import(user,bid,account_ids,per_account):
+    accounts=_ready_accounts(user,account_ids)
+    contacts=db.rows('contacts',user,eq={'batch_id':bid},order='created_at')
+    allocations=_allocate(contacts,accounts,per_account)
+    clients={};processed=resolved=failed=0
+    db.update('contact_batches',{'contact_import_status':'RUNNING','contact_import_processed':0,'contact_import_resolved':0,'contact_import_failed':0,'contact_import_account_ids':[int(x) for x in account_ids],'contact_import_per_account':per_account,'contact_import_started_at':now_iso(),'contact_import_completed_at':None,'contact_import_error':None},eq={'id':bid,'user_id':user})
     try:
-        targets_all=db.rows('job_targets',user,eq={'job_id':jid},order='created_at')
-        account_ids=sorted({str(x['assigned_account_id']) for x in targets_all if x.get('assigned_account_id')})
-        for aid in account_ids:
-            a=accounts.get(aid)
-            if not a:continue
-            c=await client_from_account(a);await c.connect();me=await c.get_me();clients[aid]=c
-            bot,src=await prepare_source(c,job['bot_username'],dec(job['bot_token_enc']),me.id,job['message_text'],job['button_text'],job['button_url'])
-            sources[aid]=(bot,src);base.event(user,jid,'INFO','SOURCE',f'텍스트+버튼 원본 준비 완료 message_id={src.id}',aid)
-
-        while not stop.is_set():
-            while pause.is_set() and not stop.is_set():
-                await asyncio.sleep(.3)
-            waiting=db.rows('job_targets',user,eq={'job_id':jid,'state':'WAITING'},order='created_at',limit=1)
-            if not waiting:break
-            first=waiting[0];aid=str(first['assigned_account_id']);c=clients.get(aid)
-            if c is None:
-                db.update('job_targets',{'state':'FAILED','stage':'실패','error_detail':'ASSIGNED_ACCOUNT_UNAVAILABLE','updated_at':base.now_iso()},eq={'id':first['id'],'user_id':user})
-                base.recalc_job(user,jid);continue
-
-            if not first.get('telegram_user_id'):
+        for a in accounts:
+            aid=int(a['id'])
+            c=await client_from_account(a);await c.connect();me=await c.get_me()
+            if not me: raise RuntimeError(f'ACCOUNT_NOT_READY:{aid}')
+            clients[aid]=c
+            rows=allocations.get(aid,[])
+            for start in range(0,len(rows),BATCH_SIZE):
+                chunk=rows[start:start+BATCH_SIZE]
+                request=[];mapping={}
+                for item in chunk:
+                    cid=random.randrange(1,2**63)
+                    while cid in mapping: cid=random.randrange(1,2**63)
+                    mapping[cid]=item
+                    request.append(InputPhoneContact(client_id=cid,phone=item['phone'],first_name=f'N-{str(item["id"])[:8]}',last_name=''))
                 try:
-                    did=await _import_waiting_batch(user,jid,aid,c)
-                    if did:continue
+                    result=await c(functions.contacts.ImportContactsRequest(request))
                 except Exception as e:
                     if is_rate_error(e):
-                        batch=db.rows('job_targets',user,eq={'job_id':jid,'state':'WAITING','assigned_account_id':int(aid)},order='created_at',limit=BATCH_SIZE)
-                        for t in batch:
-                            db.update('job_targets',{'state':'CHECK_REQUIRED','stage':'Telegram 제한','error_code':'TELEGRAM_RATE_LIMIT','error_detail':str(e),'updated_at':base.now_iso()},eq={'id':t['id'],'user_id':user})
-                        db.update('jobs',{'status':'PAUSED','stop_reason':'TELEGRAM_RATE_LIMIT','updated_at':base.now_iso()},eq={'id':jid,'user_id':user})
-                        base.event(user,jid,'CRITICAL','RATE_LIMIT',f'Telegram 제한 감지 / 전체 작업 중지 / {e}',aid);stop.set();break
-                    db.update('job_targets',{'state':'FAILED','stage':'연락처 추가 실패','error_detail':str(e),'updated_at':base.now_iso()},eq={'id':first['id'],'user_id':user})
-                    base.event(user,jid,'ERROR','TARGET',f"{first['phone']} 연락처 추가 실패 / {e}",aid);base.recalc_job(user,jid);continue
-
-            waiting=db.rows('job_targets',user,eq={'job_id':jid,'state':'WAITING'},order='created_at',limit=1)
-            if not waiting:continue
-            t=waiting[0];tid=t['id'];aid=str(t['assigned_account_id']);c=clients.get(aid);bot,src=sources.get(aid,(None,None))
-            uid=t.get('telegram_user_id')
-            if not uid:continue
-            try:
-                if job.get('global_dedupe'):
-                    history=db.rows('send_history',user,order='created_at',desc=True)
-                    if any(h.get('phone')==t['phone'] or str(h.get('telegram_user_id'))==str(uid) for h in history):
-                        db.update('job_targets',{'state':'SKIPPED','stage':'중복 제외','updated_at':base.now_iso()},eq={'id':tid,'user_id':user})
-                        base.event(user,jid,'INFO','DEDUPE',f"{t['phone']} 기존 성공 이력으로 제외",aid);base.recalc_job(user,jid);continue
-                db.update('job_targets',{'state':'PROCESSING','stage':'발송 중','updated_at':base.now_iso()},eq={'id':tid,'user_id':user})
-                peer=await c.get_input_entity(uid);sent=await c.forward_messages(peer,src.id,from_peer=bot);msg=sent[0] if isinstance(sent,list) else sent;mid=int(msg.id)
-                db.update('job_targets',{'state':'SENT','stage':'완료','message_id':mid,'updated_at':base.now_iso()},eq={'id':tid,'user_id':user})
-                db.insert('send_history',{'user_id':user,'phone':t['phone'],'telegram_user_id':uid,'account_id':int(aid),'job_id':jid,'message_id':mid})
-                a=accounts.get(aid) or {};db.update('telegram_accounts',{'sent_count':int(a.get('sent_count') or 0)+1},eq={'id':int(aid),'user_id':user});a['sent_count']=int(a.get('sent_count') or 0)+1
-                base.event(user,jid,'INFO','SEND',f"{t['phone']} 발송 완료 message_id={mid}",aid);base.recalc_job(user,jid)
-                await asyncio.sleep(random.uniform(float(job.get('delay_min') or 0),float(job.get('delay_max') or 0)))
-            except Exception as e:
-                if is_rate_error(e):
-                    db.update('job_targets',{'state':'CHECK_REQUIRED','stage':'Telegram 제한','error_code':'TELEGRAM_RATE_LIMIT','error_detail':str(e),'updated_at':base.now_iso()},eq={'id':tid,'user_id':user})
-                    db.update('jobs',{'status':'PAUSED','stop_reason':'TELEGRAM_RATE_LIMIT','updated_at':base.now_iso()},eq={'id':jid,'user_id':user})
-                    base.event(user,jid,'CRITICAL','RATE_LIMIT',f'Telegram 제한 감지 / 전체 작업 중지 / {e}',aid);stop.set();break
-                db.update('job_targets',{'state':'FAILED','stage':'실패','error_detail':str(e),'updated_at':base.now_iso()},eq={'id':tid,'user_id':user})
-                base.event(user,jid,'ERROR','TARGET',f"{t['phone']} 실패 / {e}",aid);base.recalc_job(user,jid)
-
-        current=db.one('jobs',user,eq={'id':jid})
-        if current and current.get('status') not in ('PAUSED','STOPPED'):
-            db.update('jobs',{'status':'COMPLETED','updated_at':base.now_iso()},eq={'id':jid,'user_id':user});base.event(user,jid,'INFO','JOB','작업 완료')
+                        db.update('contact_batches',{'contact_import_status':'PAUSED','contact_import_error':f'TELEGRAM_RATE_LIMIT: {str(e)[:500]}'},eq={'id':bid,'user_id':user})
+                        return
+                    for item in chunk:
+                        failed+=1;processed+=1
+                        db.update('contacts',{'assigned_account_id':aid,'state':'IMPORT_FAILED','detail':str(e)[:500]},eq={'id':item['id'],'user_id':user})
+                    db.update('contact_batches',{'contact_import_processed':processed,'contact_import_resolved':resolved,'contact_import_failed':failed},eq={'id':bid,'user_id':user})
+                    continue
+                imported={int(x.client_id):int(x.user_id) for x in (getattr(result,'imported',None) or [])}
+                for cid,item in mapping.items():
+                    processed+=1;uid=imported.get(int(cid))
+                    if uid:
+                        resolved+=1
+                        db.update('contacts',{'telegram_user_id':uid,'assigned_account_id':aid,'state':'RESOLVED','detail':'연락처 추가 완료 / Telegram UID 확인'},eq={'id':item['id'],'user_id':user})
+                    else:
+                        failed+=1
+                        db.update('contacts',{'telegram_user_id':None,'assigned_account_id':aid,'state':'NOT_RESOLVED','detail':'연락처 추가 완료 / Telegram 사용자 확인 불가'},eq={'id':item['id'],'user_id':user})
+                db.update('contact_batches',{'contact_import_processed':processed,'contact_import_resolved':resolved,'contact_import_failed':failed},eq={'id':bid,'user_id':user})
+                await asyncio.sleep(0)
+        db.update('contact_batches',{'contact_import_status':'COMPLETED','contact_import_processed':processed,'contact_import_resolved':resolved,'contact_import_failed':failed,'contact_import_completed_at':now_iso()},eq={'id':bid,'user_id':user})
+    except Exception as e:
+        db.update('contact_batches',{'contact_import_status':'FAILED','contact_import_error':str(e)[:1000],'contact_import_processed':processed,'contact_import_resolved':resolved,'contact_import_failed':failed},eq={'id':bid,'user_id':user})
     finally:
         for c in clients.values():
-            try:await c.disconnect()
-            except Exception:pass
-        base._tasks.pop(jid,None);base._stops.pop(jid,None);base._pauses.pop(jid,None)
+            try: await c.disconnect()
+            except Exception: pass
+        _import_tasks.pop(str(bid),None)
 
-# Existing /start route resolves base.run_job dynamically, so patch only the engine function.
-base.run_job=run_job_batched
+
+@app.post('/v1/batches/{bid}/import-contacts')
+async def start_contact_import(bid:int,p:ContactImportStart,user=Depends(auth)):
+    batch=_batch(user,bid);accounts=_ready_accounts(user,p.account_ids)
+    contacts=db.rows('contacts',user,eq={'batch_id':bid},order='created_at')
+    _allocate(contacts,accounts,p.max_contacts_per_account)
+    key=str(bid)
+    if key in _import_tasks and not _import_tasks[key].done(): raise HTTPException(409,'이미 연락처 추가 작업이 진행 중입니다.')
+    _import_tasks[key]=asyncio.create_task(_run_import(user,bid,[int(x['id']) for x in accounts],p.max_contacts_per_account))
+    return {'ok':True,'batch_id':bid,'total_count':len(contacts),'account_count':len(accounts),'max_contacts_per_account':p.max_contacts_per_account,'batch_size':BATCH_SIZE,'status':'RUNNING'}
+
+
+@app.get('/v1/batches/{bid}/import-contacts')
+def contact_import_status(bid:int,user=Depends(auth)):
+    b=_batch(user,bid)
+    return {'batch_id':bid,'status':b.get('contact_import_status') or 'NOT_STARTED','total_count':int(b.get('total_count') or 0),'processed':int(b.get('contact_import_processed') or 0),'resolved':int(b.get('contact_import_resolved') or 0),'failed':int(b.get('contact_import_failed') or 0),'account_ids':b.get('contact_import_account_ids') or [],'max_contacts_per_account':b.get('contact_import_per_account'),'error':b.get('contact_import_error')}
