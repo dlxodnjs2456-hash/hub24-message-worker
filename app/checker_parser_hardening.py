@@ -1,19 +1,6 @@
 from . import checker as base
 
 
-def _looks_active(v):
-    if v in (None,''):
-        return False
-    s=str(v).strip()
-    try:
-        float(s)
-        return True
-    except Exception:
-        pass
-    sl=s.lower()
-    return any(x in sl for x in ('day','hour','min','online','recent','today','yesterday','일','시간','분'))
-
-
 def _parse_export_hardened(raw:bytes):
     rows=base._rows_from_export(raw)
     if not rows:
@@ -48,10 +35,12 @@ def _parse_export_hardened(raw:bytes):
 
     pi=exact_idx(aliases_phone,0)
     ui=exact_idx(aliases_uid,1 if not has_header else None)
-    ni=exact_idx(aliases_user,None)
+    ni=exact_idx(aliases_user,2 if not has_header else None)
     ai=exact_idx(aliases_active,None)
     if ai is None:
         ai=fuzzy_active_idx()
+    if not has_header:
+        ai=3
 
     out={}
     for row in rows[start:]:
@@ -60,32 +49,12 @@ def _parse_export_hardened(raw:bytes):
         n=base._normalize(str(row[pi] or ''))
         if not n:
             continue
-
-        # Provider exports without a header are commonly:
-        # phone, telegram_uid, telegram_active
-        # or phone, telegram_uid, telegram_username, telegram_active.
-        # Do not mistake a numeric activity value such as 0 for username.
-        row_ni=ni
-        row_ai=ai
-        if not has_header:
-            if len(row)==3:
-                row_ni=None
-                row_ai=2
-            elif len(row)>=4:
-                if _looks_active(row[2]) and not _looks_active(row[3]):
-                    row_ai=2
-                    row_ni=3
-                else:
-                    row_ni=2
-                    row_ai=3
-
         active=None
-        if row_ai is not None and row_ai<len(row) and row[row_ai] not in (None,''):
-            active=str(row[row_ai]).strip()
+        if ai is not None and ai<len(row) and row[ai] not in (None,''):
+            active=str(row[ai]).strip()
         username=None
-        if row_ni is not None and row_ni<len(row) and row[row_ni] not in (None,''):
-            username=str(row[row_ni]).strip()
-
+        if ni is not None and ni<len(row) and row[ni] not in (None,'','0'):
+            username=str(row[ni]).strip()
         out[n]={
             'status':'REGISTERED',
             'telegram_id':row[ui] if ui is not None and ui<len(row) else None,
@@ -95,5 +64,5 @@ def _parse_export_hardened(raw:bytes):
     return out
 
 
-# Apply only to checker provider parsing/recovery. Telegram send logic is untouched.
+# Checker provider parser only. Telegram send logic is untouched.
 base._parse_export=_parse_export_hardened
