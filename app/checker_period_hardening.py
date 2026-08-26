@@ -29,7 +29,7 @@ def _within(v,days):
     return d is not None and d<=days
 
 def _period_label(days):
-    return '전체' if int(days or 0)==0 else f'최근 {int(days)}일'
+    return '전체 활동 가입자' if int(days or 0)==0 else f'최근 {int(days)}일 활동 가입자'
 
 @app.post('/v1/checker/upload')
 async def checker_upload_v2(file:UploadFile=File(...),activity_days:int=Form(0),user=Depends(auth)):
@@ -65,8 +65,9 @@ def checker_results_v2(jid:int,limit:int=200,user=Depends(auth)):
     job=q('npay_checker_jobs').select('activity_days').eq('id',jid).eq('user_id',user).maybe_single().execute().data
     if not job: raise HTTPException(404,'CHECKER_JOB_NOT_FOUND')
     days=int(job.get('activity_days') or 0)
-    rows=q('npay_checker_items').select('id,row_no,phone,status,telegram_id,telegram_username,telegram_active,checked_at,error_code,error_message').eq('job_id',jid).eq('user_id',user).eq('status','REGISTERED').order('telegram_active',desc=True,nullsfirst=False).limit(min(limit,1000)).execute().data or []
+    rows=q('npay_checker_items').select('id,row_no,phone,status,telegram_id,telegram_username,telegram_active,checked_at,error_code,error_message').eq('job_id',jid).eq('user_id',user).eq('status','REGISTERED').order('id').execute().data or []
     rows=[x for x in rows if _within(x.get('telegram_active'),days)]
+    rows=rows[:min(limit,1000)]
     for x in rows:
         x['within_period']=True
         x['activity_period']=_period_label(days)
@@ -81,7 +82,7 @@ def checker_download_v2(jid:int,filter:str='all',user=Depends(auth)):
     if filter=='registered': rows=[x for x in rows if x['status']=='REGISTERED' and _within(x.get('telegram_active'),days)]
     elif filter=='unknown': rows=[x for x in rows if x['status'] in ('UNKNOWN','NOT_REGISTERED')]
     elif filter=='error': rows=[x for x in rows if x['status'] in ('API_ERROR','RATE_LIMITED','TIMEOUT')]
-    wb=Workbook();ws=wb.active;ws.title='검수결과';ws.append(['전화번호','가입여부','텔레그램 UID','텔레그램 ID','텔레그램 접속일자','활동 기간 분류'])
+    wb=Workbook();ws=wb.active;ws.title='검수결과';ws.append(['전화번호','가입여부','텔레그램 UID','텔레그램 ID','텔레그램 접속일자','활동 기간'])
     labels={'REGISTERED':'가입 확인','NOT_REGISTERED':'미가입','UNKNOWN':'확인 불가','API_ERROR':'오류','RATE_LIMITED':'호출 제한','TIMEOUT':'시간 초과','WAITING':'대기'}
     for x in rows:
         activity=_period_label(days) if x.get('status')=='REGISTERED' and _within(x.get('telegram_active'),days) else '-'
