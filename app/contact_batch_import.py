@@ -13,7 +13,7 @@ _import_tasks={}
 
 class ContactImportStart(BaseModel):
     account_ids:list[int]=Field(default_factory=list)
-    max_contacts_per_account:int=Field(default=50, ge=1, le=60)
+    max_contacts_per_account:int=Field(default=50, ge=1, le=1000)
 
 
 def _batch(user,bid):
@@ -35,7 +35,7 @@ def _ready_accounts(user,ids):
 def _allocate(contacts,accounts,per_account):
     capacity=len(accounts)*per_account
     if len(contacts)>capacity:
-        raise HTTPException(400,f'계정 처리용량 부족: DB {len(contacts)}건 / 현재 최대 {capacity}건. 계정을 추가하거나 계정당 최대 처리개수를 늘려주세요.')
+        raise HTTPException(400,f'계정 처리용량 부족: DB {len(contacts)}건 / 현재 최대 {capacity}건. 계정당 최대 처리개수를 DB 수량에 맞게 설정해주세요.')
     allocations={int(a['id']):[] for a in accounts};idx=0
     for a in accounts:
         aid=int(a['id'])
