@@ -32,16 +32,19 @@ def _ready_accounts(user,ids):
     return selected
 
 
+def _available_contacts(user,bid):
+    return db.sb.table('contacts').select('*').eq('user_id',user).eq('batch_id',bid).is_('assigned_account_id','null').order('created_at').execute().data or []
+
+
 def _allocate(contacts,accounts,per_account):
-    capacity=len(accounts)*per_account
-    if len(contacts)>capacity:
-        raise HTTPException(400,f'계정 처리용량 부족: DB {len(contacts)}건 / 현재 최대 {capacity}건. 계정당 최대 처리개수를 DB 수량에 맞게 설정해주세요.')
+    capacity=max(0,len(accounts)*int(per_account))
+    selected=contacts[:capacity]
     allocations={int(a['id']):[] for a in accounts};idx=0
     for a in accounts:
         aid=int(a['id'])
-        for _ in range(per_account):
-            if idx>=len(contacts): break
-            allocations[aid].append(contacts[idx]);idx+=1
+        for _ in range(int(per_account)):
+            if idx>=len(selected): break
+            allocations[aid].append(selected[idx]);idx+=1
     return allocations
 
 
@@ -58,6 +61,10 @@ def _progress_seed(accounts,allocations):
     return out
 
 
+def _progress_total(progress):
+    return sum(int((v or {}).get('total') or 0) for v in (progress or {}).values())
+
+
 def _save_progress(user,bid,progress,processed,resolved,failed,**extra):
     payload={
         'contact_import_account_progress':progress,
@@ -71,9 +78,14 @@ def _save_progress(user,bid,progress,processed,resolved,failed,**extra):
 
 async def _run_import(user,bid,account_ids,per_account):
     accounts=_ready_accounts(user,account_ids)
-    contacts=db.rows('contacts',user,eq={'batch_id':bid},order='created_at')
+    contacts=_available_contacts(user,bid)
     allocations=_allocate(contacts,accounts,per_account)
     clients={};processed=resolved=failed=0;progress=_progress_seed(accounts,allocations)
+    assigned_total=_progress_total(progress)
+    if assigned_total<=0:
+        db.update('contact_batches',{'contact_import_status':'COMPLETED','contact_import_processed':0,'contact_import_resolved':0,'contact_import_failed':0,'contact_import_account_ids':[int(x) for x in account_ids],'contact_import_per_account':per_account,'contact_import_started_at':now_iso(),'contact_import_completed_at':now_iso(),'contact_import_error':None,'contact_import_account_progress':progress},eq={'id':bid,'user_id':user})
+        _import_tasks.pop(str(bid),None)
+        return
     db.update('contact_batches',{'contact_import_status':'RUNNING','contact_import_processed':0,'contact_import_resolved':0,'contact_import_failed':0,'contact_import_account_ids':[int(x) for x in account_ids],'contact_import_per_account':per_account,'contact_import_started_at':now_iso(),'contact_import_completed_at':None,'contact_import_error':None,'contact_import_account_progress':progress},eq={'id':bid,'user_id':user})
     try:
         for a in accounts:
@@ -129,18 +141,24 @@ async def _run_import(user,bid,account_ids,per_account):
 
 @app.post('/v1/batches/{bid}/import-contacts')
 async def start_contact_import(bid:int,p:ContactImportStart,user=Depends(auth)):
-    batch=_batch(user,bid);accounts=_ready_accounts(user,p.account_ids)
-    contacts=db.rows('contacts',user,eq={'batch_id':bid},order='created_at')
+    _batch(user,bid);accounts=_ready_accounts(user,p.account_ids)
+    contacts=_available_contacts(user,bid)
     allocations=_allocate(contacts,accounts,p.max_contacts_per_account)
+    assigned_total=sum(len(v) for v in allocations.values())
+    if assigned_total<=0: raise HTTPException(400,'이 DB에 미배정 연락처가 없습니다.')
     key=str(bid)
     if key in _import_tasks and not _import_tasks[key].done(): raise HTTPException(409,'이미 연락처 추가 작업이 진행 중입니다.')
     progress=_progress_seed(accounts,allocations)
     db.update('contact_batches',{'contact_import_account_progress':progress},eq={'id':bid,'user_id':user})
     _import_tasks[key]=asyncio.create_task(_run_import(user,bid,[int(x['id']) for x in accounts],p.max_contacts_per_account))
-    return {'ok':True,'batch_id':bid,'total_count':len(contacts),'account_count':len(accounts),'max_contacts_per_account':p.max_contacts_per_account,'batch_size':BATCH_SIZE,'status':'RUNNING','account_progress':progress}
+    return {'ok':True,'batch_id':bid,'total_count':assigned_total,'remaining_count':max(0,len(contacts)-assigned_total),'account_count':len(accounts),'max_contacts_per_account':p.max_contacts_per_account,'batch_size':BATCH_SIZE,'status':'RUNNING','account_progress':progress}
 
 
 @app.get('/v1/batches/{bid}/import-contacts')
 def contact_import_status(bid:int,user=Depends(auth)):
     b=_batch(user,bid)
-    return {'batch_id':bid,'status':b.get('contact_import_status') or 'NOT_STARTED','total_count':int(b.get('total_count') or 0),'processed':int(b.get('contact_import_processed') or 0),'resolved':int(b.get('contact_import_resolved') or 0),'failed':int(b.get('contact_import_failed') or 0),'account_ids':b.get('contact_import_account_ids') or [],'max_contacts_per_account':b.get('contact_import_per_account'),'account_progress':b.get('contact_import_account_progress') or {},'error':b.get('contact_import_error')}
+    progress=b.get('contact_import_account_progress') or {}
+    assigned_total=_progress_total(progress)
+    remaining=len(_available_contacts(user,bid))
+    batch_total=int(b.get('total_count') or 0)
+    return {'batch_id':bid,'status':b.get('contact_import_status') or 'NOT_STARTED','total_count':assigned_total,'batch_total_count':batch_total,'remaining_count':remaining,'assigned_count':max(0,batch_total-remaining),'processed':int(b.get('contact_import_processed') or 0),'resolved':int(b.get('contact_import_resolved') or 0),'failed':int(b.get('contact_import_failed') or 0),'account_ids':b.get('contact_import_account_ids') or [],'max_contacts_per_account':b.get('contact_import_per_account'),'account_progress':progress,'error':b.get('contact_import_error')}
