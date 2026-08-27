@@ -26,6 +26,11 @@ def _result_rows(found):
     return out
 
 
+def _still_running(jid,user):
+    row=q('npay_checker_jobs').select('status').eq('id',jid).eq('user_id',user).maybe_single().execute().data
+    return bool(row and str(row.get('status') or '').upper()=='RUNNING')
+
+
 async def _finish_existing_job(job):
     jid=job['id']; user=job['user_id']; task_ids=job.get('api_task_ids') or []
     key=str(jid)
@@ -35,22 +40,29 @@ async def _finish_existing_job(job):
     timeout=max(5,int(settings.check_api_timeout_seconds or 30))
     found={}
     try:
+        if not _still_running(jid,user):
+            return
         q('npay_checker_jobs').update({'provider_status':'RECOVERING','provider_last_check_at':base.now_iso(),'updated_at':base.now_iso()}).eq('id',jid).eq('user_id',user).execute()
         async with httpx.AsyncClient(timeout=timeout,follow_redirects=True) as client:
             for tid in task_ids:
+                if not _still_running(jid,user):
+                    return
                 st=await base._wait_provider_task(client,str(tid))
+                if not _still_running(jid,user):
+                    return
                 q('npay_checker_jobs').update({'provider_status':st,'provider_last_check_at':base.now_iso(),'updated_at':base.now_iso()}).eq('id',jid).eq('user_id',user).execute()
                 raw=await base._export_provider_task(client,str(tid))
                 found.update(base._parse_export(raw))
-        # Apply every result and finish the job in one DB transaction. This prevents
-        # a Worker restart from leaving only part of the file written.
+        if not _still_running(jid,user):
+            return
         db.sb.rpc('npay_finalize_checker_job',{
             'p_user':user,
             'p_job_id':jid,
             'p_results':_result_rows(found),
         }).execute()
     except Exception as e:
-        q('npay_checker_jobs').update({'provider_status':'RECOVERY_WAIT','error_message':f'RECOVERY:{str(e)[:900]}','updated_at':base.now_iso()}).eq('id',jid).eq('user_id',user).execute()
+        if _still_running(jid,user):
+            q('npay_checker_jobs').update({'provider_status':'RECOVERY_WAIT','error_message':f'RECOVERY:{str(e)[:900]}','updated_at':base.now_iso()}).eq('id',jid).eq('user_id',user).execute()
     finally:
         _recovering.discard(key)
 
@@ -63,8 +75,6 @@ async def _recover_once():
 
 
 async def _recovery_loop():
-    # Do one quick pass after startup, then keep watching. A transient provider
-    # error or another Worker restart no longer strands a paid checker job.
     await asyncio.sleep(2)
     while True:
         try:
