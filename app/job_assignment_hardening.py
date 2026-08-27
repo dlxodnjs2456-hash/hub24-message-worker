@@ -34,6 +34,28 @@ def create_job_assigned(p:JobCreateAssigned,user=Depends(auth)):
         if aid in ready_map and aid not in selected_ids: selected_ids.append(aid)
     if not selected_ids: raise HTTPException(400,'사용할 READY Telegram 계정을 1개 이상 선택하세요.')
 
+    # A previous create may have succeeded even if the browser failed before /start.
+    # Reuse that pending job instead of creating a second, partially overlapping job.
+    existing_jobs=db.rows('jobs',user,eq={'batch_id':p.batch_id},order='created_at',desc=True)
+    selected_set=set(selected_ids)
+    for old in existing_jobs:
+        if str(old.get('operation_mode') or '')!='SEND_RESOLVED_CONTACTS':
+            continue
+        if str(old.get('status') or '').upper() not in ('WAITING','RUNNING','PAUSED'):
+            continue
+        old_ids={int(x) for x in (old.get('selected_account_ids') or [])}
+        if old_ids and old_ids!=selected_set:
+            continue
+        targets=db.rows('job_targets',user,eq={'job_id':old['id']},order=None)
+        if not targets:
+            continue
+        result=dict(old)
+        result['assigned_count']=len(targets)
+        result['selected_account_count']=len(old_ids or selected_set)
+        result['reused']=True
+        event(user,old['id'],'INFO','JOB',f'기존 발송 JOB 재사용 / 대상 {len(targets)}건')
+        return result
+
     contacts=db.rows('contacts',user,eq={'batch_id':p.batch_id,'state':'RESOLVED'},order='created_at')
     contacts=[c for c in contacts if c.get('telegram_user_id') and int(c.get('assigned_account_id') or 0) in selected_ids]
     if not contacts: raise HTTPException(400,'발송 가능한 배정 연락처가 없습니다. DB 관리에서 먼저 연락처를 배정하고 추가하세요.')
@@ -64,4 +86,4 @@ def create_job_assigned(p:JobCreateAssigned,user=Depends(auth)):
     for c in contacts:
         db.update('contacts',{'state':'QUEUED','detail':f'발송 JOB #{jid} 배정 완료'},eq={'id':c['id'],'user_id':user})
     event(user,jid,'INFO','JOB',f'발송 JOB 생성 / 이번 배정 대상 {len(targets)}건 / 선택 계정 {len(selected_ids)}개')
-    result=dict(job);result['assigned_count']=len(targets);result['selected_account_count']=len(selected_ids);return result
+    result=dict(job);result['assigned_count']=len(targets);result['selected_account_count']=len(selected_ids);result['reused']=False;return result
