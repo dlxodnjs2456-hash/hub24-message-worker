@@ -14,6 +14,24 @@ def _safe_error(e):
     return str(e or '')[:500]
 
 
+async def _resolve_postbot(client):
+    """Resolve the inline bot once per Telegram client.
+
+    Some sessions fail when a bare username string is passed directly to
+    inline_query(). Resolve the bot entity first and use the resolved entity
+    for all inline queries made by that account.
+    """
+    last_error = None
+    for username in ('@PostBot', '@postbot', '@post_bot'):
+        try:
+            entity = await client.get_entity(username)
+            if entity:
+                return entity
+        except Exception as e:
+            last_error = e
+    raise RuntimeError(f'POSTBOT_USERNAME_NOT_RESOLVED:{_safe_error(last_error)}')
+
+
 async def _run_image_job(user, jid):
     job = db.one('jobs', user, eq={'id': jid})
     if not job:
@@ -45,7 +63,8 @@ async def _run_image_job(user, jid):
         probe = await client_from_account(first_account)
         try:
             await probe.connect()
-            probe_results = await probe.inline_query('PostBot', post_code)
+            postbot = await _resolve_postbot(probe)
+            probe_results = await probe.inline_query(postbot, post_code)
             if not probe_results:
                 raise RuntimeError('POSTBOT_RESULT_NOT_FOUND')
         finally:
@@ -67,6 +86,7 @@ async def _run_image_job(user, jid):
                     me = await client.get_me()
                     if not me:
                         raise RuntimeError(f'ACCOUNT_NOT_READY:{aid}')
+                    postbot = await _resolve_postbot(client)
                     main.event(user, jid, 'INFO', 'ACCOUNT', f'이미지 발송 계정 시작 / 배정 {len(rows)}건', aid)
 
                     for target in rows:
@@ -112,7 +132,7 @@ async def _run_image_job(user, jid):
 
                         try:
                             peer = await client.get_input_entity(int(uid))
-                            results = await client.inline_query('PostBot', post_code)
+                            results = await client.inline_query(postbot, post_code)
                             if not results:
                                 raise RuntimeError('POSTBOT_RESULT_NOT_FOUND')
                             sent = await results[0].click(peer)
@@ -165,7 +185,13 @@ async def _run_image_job(user, jid):
                                     return
                                 continue
 
-                            code = 'POSTBOT_RESULT_NOT_FOUND' if 'POSTBOT_RESULT_NOT_FOUND' in str(e) else 'SEND_FAILED'
+                            text = str(e)
+                            if 'POSTBOT_RESULT_NOT_FOUND' in text:
+                                code = 'POSTBOT_RESULT_NOT_FOUND'
+                            elif 'POSTBOT_USERNAME_NOT_RESOLVED' in text or 'No user has' in text:
+                                code = 'POSTBOT_USERNAME_NOT_RESOLVED'
+                            else:
+                                code = 'SEND_FAILED'
                             db.update('job_targets', {
                                 'state': 'FAILED',
                                 'stage': '이미지 발송 실패',
