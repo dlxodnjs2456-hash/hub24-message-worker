@@ -1,137 +1,136 @@
-import asyncio
-import random
-import re
-
 from fastapi import Depends, HTTPException
-from pydantic import BaseModel
-from telethon.tl import functions
-from telethon.tl.types import InputPhoneContact
+from pydantic import BaseModel, Field
 
-from .main import app, auth
+from .main import app, auth, event
 from . import db
-from .telegram import client_from_account, is_rate_error
+from .security import enc
 
 
-def q(table):
-    return db.sb.table(table)
-
-
-def _phone(value: str):
-    digits = re.sub(r'\D', '', str(value or ''))
-    if digits.startswith('82'):
-        digits = '0' + digits[2:]
-    if len(digits) == 11 and digits.startswith('010'):
-        return '+82' + digits[1:]
-    return None
-
-
-def _display_phone(value: str):
-    digits = re.sub(r'\D', '', str(value or ''))
-    if digits.startswith('82'):
-        digits = '0' + digits[2:]
-    if len(digits) == 11 and digits.startswith('010'):
-        return f'{digits[:3]}-{digits[3:7]}-{digits[7:]}'
-    return str(value or '')
-
-
-class ImageSendRequest(BaseModel):
-    account_id: int
+class ImageJobCreate(BaseModel):
+    batch_id: int
     post_code: str
-    phones: list[str]
+    account_ids: list[int] = Field(default_factory=list)
+    contacts_per_account: int = Field(default=50, ge=1, le=1000)
+    delay_min: float = 2
+    delay_max: float = 5
+    global_dedupe: bool = True
 
 
-@app.post('/v1/telegram/image-send')
-async def image_send(p: ImageSendRequest, user=Depends(auth)):
+@app.post('/v1/image-jobs')
+def create_image_job(p: ImageJobCreate, user=Depends(auth)):
     code = str(p.post_code or '').strip()
-    raw_phones = [str(x or '').strip() for x in (p.phones or [])]
     if not code:
         raise HTTPException(400, 'POSTBOT_CODE_REQUIRED')
-    if len(raw_phones) != 3 or any(not x for x in raw_phones):
-        raise HTTPException(400, 'IMAGE_SEND_REQUIRES_EXACTLY_3_PHONES')
 
-    normalized = [_phone(x) for x in raw_phones]
-    if any(not x for x in normalized):
-        raise HTTPException(400, 'INVALID_KR_PHONE_NUMBER')
-    if len(set(normalized)) != 3:
-        raise HTTPException(400, 'PHONE_NUMBERS_MUST_BE_DIFFERENT')
+    batch = db.one('contact_batches', user, eq={'id': p.batch_id})
+    if not batch:
+        raise HTTPException(404, 'batch not found')
+    if str(batch.get('contact_import_status') or '') != 'COMPLETED':
+        raise HTTPException(409, '먼저 연락처 추가 작업을 완료하세요.')
 
-    rows = q('telegram_accounts').select('*').eq('id', int(p.account_id)).eq('user_id', user).limit(1).execute().data or []
-    if not rows:
-        raise HTTPException(404, 'ACCOUNT_NOT_FOUND')
-    account = rows[0]
-    if str(account.get('status') or '').upper() not in ('READY', 'CONNECTED'):
-        raise HTTPException(409, 'ACCOUNT_NOT_READY')
+    ready = db.rows('telegram_accounts', user, eq={'status': 'READY'}, order='created_at')
+    ready_map = {int(a['id']): a for a in ready}
+    requested = [int(x) for x in p.account_ids] if p.account_ids else [int(x) for x in (batch.get('contact_import_account_ids') or [])]
+    selected_ids = []
+    for aid in requested:
+        if aid in ready_map and aid not in selected_ids:
+            selected_ids.append(aid)
+    if not selected_ids:
+        raise HTTPException(400, '사용할 READY Telegram 계정을 1개 이상 선택하세요.')
 
-    client = None
+    # If the browser lost the response after a successful create, reuse the same
+    # pending image job instead of creating a partially overlapping second job.
+    existing_jobs = db.rows('jobs', user, eq={'batch_id': p.batch_id}, order='created_at', desc=True)
+    selected_set = set(selected_ids)
+    for old in existing_jobs:
+        if str(old.get('operation_mode') or '') != 'IMAGE_POSTBOT':
+            continue
+        if str(old.get('status') or '').upper() not in ('WAITING', 'RUNNING', 'PAUSED'):
+            continue
+        if str(old.get('message_text') or '') != code:
+            continue
+        old_ids = {int(x) for x in (old.get('selected_account_ids') or [])}
+        if old_ids and old_ids != selected_set:
+            continue
+        targets = db.rows('job_targets', user, eq={'job_id': old['id']}, order=None)
+        if not targets:
+            continue
+        result = dict(old)
+        result['assigned_count'] = len(targets)
+        result['selected_account_count'] = len(old_ids or selected_set)
+        result['reused'] = True
+        event(user, old['id'], 'INFO', 'JOB', f'기존 이미지 발송 JOB 재사용 / 대상 {len(targets)}건')
+        return result
+
+    contacts = db.rows('contacts', user, eq={'batch_id': p.batch_id, 'state': 'RESOLVED'}, order='created_at')
+    contacts = [
+        c for c in contacts
+        if c.get('telegram_user_id') and int(c.get('assigned_account_id') or 0) in selected_ids
+    ]
+    if not contacts:
+        raise HTTPException(400, '발송 가능한 배정 연락처가 없습니다. DB 관리에서 먼저 연락처를 배정하고 추가하세요.')
+
+    required_points = len(contacts) * 15
+    wallet = db.one('point_wallets', user, eq={'user_id': user}) or {}
+    available_points = int(wallet.get('available_balance') or 0)
+    if available_points < required_points:
+        possible = available_points // 15
+        raise HTTPException(
+            409,
+            f'발송 포인트가 부족합니다. 필요 {required_points:,}P / 보유 {available_points:,}P / 현재 최대 {possible:,}건 발송 가능'
+        )
+
     try:
-        client = await client_from_account(account)
-        await client.connect()
-        me = await client.get_me()
-        if not me:
-            raise HTTPException(409, 'ACCOUNT_NOT_READY')
-
-        request = []
-        cid_to_index = {}
-        for index, phone in enumerate(normalized):
-            cid = random.randrange(1, 2**63)
-            while cid in cid_to_index:
-                cid = random.randrange(1, 2**63)
-            cid_to_index[cid] = index
-            request.append(InputPhoneContact(
-                client_id=cid,
-                phone=phone,
-                first_name=f'NPay-Image-{index + 1}',
-                last_name='',
-            ))
-
-        try:
-            imported = await client(functions.contacts.ImportContactsRequest(request))
-        except Exception as e:
-            msg = str(e or '')[:500]
-            if is_rate_error(e):
-                raise HTTPException(429, f'TELEGRAM_RATE_LIMIT:{msg}')
-            raise HTTPException(400, f'CONTACT_IMPORT_FAILED:{msg}')
-
-        resolved = {}
-        for item in (getattr(imported, 'imported', None) or []):
-            idx = cid_to_index.get(int(item.client_id))
-            if idx is not None:
-                resolved[idx] = int(item.user_id)
-
-        bot = await client.get_input_entity('PostBot')
-        results = await client.inline_query(bot, code)
-        if not results:
-            raise HTTPException(409, 'POSTBOT_RESULT_NOT_FOUND')
-
-        async def send_one(index: int):
-            display = _display_phone(raw_phones[index])
-            uid = resolved.get(index)
-            if not uid:
-                return {'phone': display, 'telegram_user_id': None, 'contact_resolved': False, 'ok': False, 'message_id': None, 'error': 'TELEGRAM_USER_NOT_RESOLVED'}
-            try:
-                peer = await client.get_input_entity(uid)
-                sent = await results[0].click(peer)
-                return {'phone': display, 'telegram_user_id': uid, 'contact_resolved': True, 'ok': True, 'message_id': int(getattr(sent, 'id', 0) or 0) or None, 'error': None}
-            except Exception as e:
-                msg = str(e or '')[:500]
-                if is_rate_error(e):
-                    return {'phone': display, 'telegram_user_id': uid, 'contact_resolved': True, 'ok': False, 'message_id': None, 'error': f'TELEGRAM_RATE_LIMIT:{msg}'}
-                return {'phone': display, 'telegram_user_id': uid, 'contact_resolved': True, 'ok': False, 'message_id': None, 'error': msg or 'IMAGE_SEND_FAILED'}
-
-        sent_results = await asyncio.gather(*(send_one(i) for i in range(3)))
-        success_count = sum(1 for x in sent_results if x['ok'])
-        resolved_count = sum(1 for x in sent_results if x['contact_resolved'])
-        return {'ok': success_count == 3, 'success_count': success_count, 'failed_count': 3 - success_count, 'resolved_count': resolved_count, 'result_count': len(results), 'account_id': int(p.account_id), 'post_code': code, 'items': sent_results}
-    except HTTPException:
-        raise
+        job = db.insert('jobs', {
+            'user_id': user,
+            'batch_id': p.batch_id,
+            'status': 'WAITING',
+            'operation_mode': 'IMAGE_POSTBOT',
+            # Existing jobs schema is reused without adding a new table/column.
+            # message_text stores only the PostBot inline post code for this mode.
+            'message_text': code,
+            'button_text': '',
+            'button_url': '',
+            'bot_username': 'PostBot',
+            'bot_token_enc': enc(''),
+            'delay_min': p.delay_min,
+            'delay_max': p.delay_max,
+            'global_dedupe': p.global_dedupe,
+            'total_count': len(contacts),
+            'pending_count': len(contacts),
+            'selected_account_ids': selected_ids,
+            'contacts_per_account': int(batch.get('contact_import_per_account') or p.contacts_per_account or 50),
+            'source_batch_total': int(batch.get('total_count') or len(contacts)),
+        })
     except Exception as e:
-        msg = str(e or '')[:500]
-        if is_rate_error(e):
-            raise HTTPException(429, f'TELEGRAM_RATE_LIMIT:{msg}')
-        raise HTTPException(400, msg or 'IMAGE_SEND_FAILED')
-    finally:
-        if client is not None:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+        msg = str(e)
+        if 'INSUFFICIENT_POINTS_FOR_JOB' in msg:
+            raise HTTPException(409, f'발송 포인트가 부족합니다. 필요 {required_points:,}P / 보유 {available_points:,}P')
+        raise
+
+    jid = job['id']
+    targets = []
+    for c in contacts:
+        targets.append({
+            'user_id': user,
+            'job_id': jid,
+            'contact_id': c['id'],
+            'phone': c['phone'],
+            'telegram_user_id': c.get('telegram_user_id'),
+            'assigned_account_id': int(c['assigned_account_id']),
+            'state': 'WAITING',
+            'stage': '이미지 발송 대기',
+        })
+    db.insert_many('job_targets', targets)
+    for c in contacts:
+        db.update('contacts', {
+            'state': 'QUEUED',
+            'detail': f'이미지 발송 JOB #{jid} 배정 완료',
+        }, eq={'id': c['id'], 'user_id': user})
+
+    event(user, jid, 'INFO', 'JOB', f'이미지+버튼 발송 JOB 생성 / 대상 {len(targets)}건 / 선택 계정 {len(selected_ids)}개')
+    result = dict(job)
+    result['assigned_count'] = len(targets)
+    result['selected_account_count'] = len(selected_ids)
+    result['reused'] = False
+    return result
