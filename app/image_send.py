@@ -121,7 +121,10 @@ def create_image_job(p: ImageJobCreate, user=Depends(auth)):
 
         stage = 'wallet'
         required_points = len(contacts) * 15
-        wallet = db.one('point_wallets', user, eq={'user_id': user}) or {}
+        # point_wallets has no id column, so do not use db.one(), whose default
+        # ordering is by id. Read the row directly by user_id instead.
+        wallet_rows = db.sb.table('point_wallets').select('user_id,available_balance').eq('user_id', user).limit(1).execute().data or []
+        wallet = wallet_rows[0] if wallet_rows else {}
         available_points = int(wallet.get('available_balance') or 0)
         if available_points < required_points:
             possible = available_points // 15
