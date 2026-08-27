@@ -7,6 +7,26 @@ from . import db
 from .telegram import client_from_account
 
 
+def _message_buttons(message):
+    items = []
+    try:
+        for row in (getattr(message, 'buttons', None) or []):
+            for button in (row or []):
+                text = str(getattr(button, 'text', '') or '').strip()
+                url = getattr(button, 'url', None)
+                if url is not None:
+                    url = str(url).strip() or None
+                if text or url:
+                    items.append({
+                        'text': text or '버튼',
+                        'url': url,
+                        'is_url': bool(url),
+                    })
+    except Exception:
+        pass
+    return items
+
+
 @app.get('/v1/accounts/{aid}/dialogs/{peer_id}/messages')
 async def dialog_messages_with_media(aid: str, peer_id: int, limit: int = 50, user=Depends(auth)):
     account = db.one('telegram_accounts', user, eq={'id': aid})
@@ -28,14 +48,13 @@ async def dialog_messages_with_media(aid: str, peer_id: int, limit: int = 50, us
             has_photo = bool(getattr(m, 'photo', None))
             if has_photo:
                 try:
-                    # A Telegram photo thumbnail is enough for the web chat viewer.
-                    # Keep it in-memory only; nothing is written to disk or Supabase.
                     raw = await c.download_media(m, file=bytes, thumb=1)
                     if raw:
                         media_data_url = 'data:image/jpeg;base64,' + base64.b64encode(raw).decode('ascii')
                 except Exception:
                     media_data_url = None
 
+            buttons = _message_buttons(m)
             items.append({
                 'id': int(m.id),
                 'date': m.date.isoformat() if m.date else None,
@@ -43,6 +62,8 @@ async def dialog_messages_with_media(aid: str, peer_id: int, limit: int = 50, us
                 'text': m.message or '',
                 'has_photo': has_photo,
                 'media_data_url': media_data_url,
+                'has_buttons': bool(buttons),
+                'buttons': buttons,
             })
 
         return {'items': items}
