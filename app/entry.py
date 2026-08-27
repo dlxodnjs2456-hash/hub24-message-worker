@@ -18,7 +18,7 @@ from . import admin_communications
 from . import public_referral
 from . import checker
 
-VERSION='5.18.0'
+VERSION='5.18.1'
 
 
 def _drop_route(path, method=None):
@@ -57,6 +57,7 @@ from . import telegram_send_preferences
 from . import job_assignment_hardening
 from . import contact_batch_import
 from . import telegram_phase64_hardening
+from . import category_delete
 from . import checker_parser_hardening
 from . import checker_period_hardening
 from . import checker_recovery
@@ -75,4 +76,4 @@ def health_db():
 
 @app.get('/health/management')
 def health_management():
-    return {'ok':True,'service':'hub24-worker','version':VERSION,'management_routes':True,'marketplace_routes':True,'marketplace_pretrade_chat':True,'seller_telegram_profile':True,'vip_market_routes':True,'community_routes':True,'banner_slot_routes':True,'referral_routes':True,'operations_hardening_routes':True,'banner_admin_hardening_routes':True,'usdt_autocharge_routes':True,'member_admin_routes':True,'admin_communications_routes':True,'public_referral_validation':True,'stability_hardening_routes':True,'private_evidence_routes':True,'usdt_claim_hardening_routes':True,'job_account_assignment_routes':True,'contact_import_separate_phase':True,'contact_batch_import_size':10,'contact_import_account_progress':True,'telegram_send_saved_preferences':True,'telegram_inline_url_buttons':True,'telegram_account_fixed_partition':True,'telegram_cross_account_parallel':True,'telegram_same_account_single_worker':True,'telegram_rate_limit_auto_failover':False,'checker_routes':True,'checker_period_hardening':True,'checker_activity_parser_hardening':True,'checker_period_matched_only':True,'checker_activity_semantics':True,'checker_drafts_hidden':True,'checker_restart_recovery':True,'checker_atomic_finalize':True,'checker_provider_mode':'TASK_POLL_EXPORT','checker_api_configured':bool(settings.check_api_base_url and settings.check_api_key),'google_fx_auto_refresh':True,'usdt_verify_diagnostics':True,'legacy_manual_charge_routes':False,'legacy_withdrawal_route':False}
+    return {'ok':True,'service':'hub24-worker','version':VERSION,'management_routes':True,'marketplace_routes':True,'marketplace_pretrade_chat':True,'seller_telegram_profile':True,'vip_market_routes':True,'community_routes':True,'banner_slot_routes':True,'referral_routes':True,'operations_hardening_routes':True,'banner_admin_hardening_routes':True,'usdt_autocharge_routes':True,'member_admin_routes':True,'admin_communications_routes':True,'public_referral_validation':True,'stability_hardening_routes':True,'private_evidence_routes':True,'usdt_claim_hardening_routes':True,'job_account_assignment_routes':True,'contact_import_separate_phase':True,'contact_batch_import_size':10,'contact_import_account_progress':True,'telegram_send_saved_preferences':True,'telegram_inline_url_buttons':True,'telegram_account_fixed_partition':True,'telegram_cross_account_parallel':True,'telegram_same_account_single_worker':True,'telegram_rate_limit_auto_failover':False,'admin_category_delete':True,'checker_routes':True,'checker_period_hardening':True,'checker_activity_parser_hardening':True,'checker_period_matched_only':True,'checker_activity_semantics':True,'checker_drafts_hidden':True,'checker_restart_recovery':True,'checker_atomic_finalize':True,'checker_provider_mode':'TASK_POLL_EXPORT','checker_api_configured':bool(settings.check_api_base_url and settings.check_api_key),'google_fx_auto_refresh':True,'usdt_verify_diagnostics':True,'legacy_manual_charge_routes':False,'legacy_withdrawal_route':False}
