@@ -38,7 +38,25 @@ def create_job_assigned(p:JobCreateAssigned,user=Depends(auth)):
     contacts=[c for c in contacts if c.get('telegram_user_id') and int(c.get('assigned_account_id') or 0) in selected_ids]
     if not contacts: raise HTTPException(400,'발송 가능한 배정 연락처가 없습니다. DB 관리에서 먼저 연락처를 배정하고 추가하세요.')
 
-    job=db.insert('jobs',{'user_id':user,'batch_id':p.batch_id,'status':'WAITING','operation_mode':'SEND_RESOLVED_CONTACTS','message_text':p.message_text,'button_text':p.button_text,'button_url':p.button_url,'bot_username':p.bot_username,'bot_token_enc':enc(p.bot_token),'delay_min':p.delay_min,'delay_max':p.delay_max,'global_dedupe':p.global_dedupe,'total_count':len(contacts),'pending_count':len(contacts),'selected_account_ids':selected_ids,'contacts_per_account':int(batch.get('contact_import_per_account') or p.contacts_per_account or 50),'source_batch_total':int(batch.get('total_count') or len(contacts))})
+    # Friendly pre-check. The DB trigger remains the final protection against overspending.
+    required_points=len(contacts)*15
+    wallet=db.one('point_wallets',user,eq={'user_id':user}) or {}
+    available_points=int(wallet.get('available_balance') or 0)
+    if available_points < required_points:
+        possible=available_points//15
+        raise HTTPException(
+            409,
+            f'발송 포인트가 부족합니다. 필요 {required_points:,}P / 보유 {available_points:,}P / 현재 최대 {possible:,}건 발송 가능'
+        )
+
+    try:
+        job=db.insert('jobs',{'user_id':user,'batch_id':p.batch_id,'status':'WAITING','operation_mode':'SEND_RESOLVED_CONTACTS','message_text':p.message_text,'button_text':p.button_text,'button_url':p.button_url,'bot_username':p.bot_username,'bot_token_enc':enc(p.bot_token),'delay_min':p.delay_min,'delay_max':p.delay_max,'global_dedupe':p.global_dedupe,'total_count':len(contacts),'pending_count':len(contacts),'selected_account_ids':selected_ids,'contacts_per_account':int(batch.get('contact_import_per_account') or p.contacts_per_account or 50),'source_batch_total':int(batch.get('total_count') or len(contacts))})
+    except Exception as e:
+        msg=str(e)
+        if 'INSUFFICIENT_POINTS_FOR_JOB' in msg:
+            raise HTTPException(409,f'발송 포인트가 부족합니다. 필요 {required_points:,}P / 보유 {available_points:,}P')
+        raise
+
     jid=job['id'];targets=[]
     for c in contacts:
         targets.append({'user_id':user,'job_id':jid,'contact_id':c['id'],'phone':c['phone'],'telegram_user_id':c.get('telegram_user_id'),'assigned_account_id':int(c['assigned_account_id']),'state':'WAITING','stage':'발송 대기'})
