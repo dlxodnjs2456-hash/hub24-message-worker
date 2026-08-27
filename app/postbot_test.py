@@ -24,9 +24,10 @@ async def postbot_test(p: PostBotTest, user=Depends(auth)):
     targets = [str(x or '').strip() for x in (p.targets or []) if str(x or '').strip()]
     if not code:
         raise HTTPException(400, 'POSTBOT_CODE_REQUIRED')
-    if len(targets) != 2:
-        raise HTTPException(400, 'POSTBOT_TEST_REQUIRES_EXACTLY_2_TARGETS')
-    if targets[0].lower() == targets[1].lower():
+    if len(targets) != 3:
+        raise HTTPException(400, 'POSTBOT_TEST_REQUIRES_EXACTLY_3_TARGETS')
+    lowered = [x.lower() for x in targets]
+    if len(set(lowered)) != 3:
         raise HTTPException(400, 'TARGETS_MUST_BE_DIFFERENT')
 
     rows = q('telegram_accounts').select('*').eq('id', int(p.account_id)).eq('user_id', user).limit(1).execute().data or []
@@ -78,9 +79,9 @@ async def postbot_test(p: PostBotTest, user=Depends(auth)):
         sent_results = await asyncio.gather(*(send_one(t, peer) for t, peer in zip(targets, peers)))
         success_count = sum(1 for x in sent_results if x['ok'])
         return {
-            'ok': success_count == 2,
+            'ok': success_count == 3,
             'success_count': success_count,
-            'failed_count': 2 - success_count,
+            'failed_count': 3 - success_count,
             'result_count': len(results),
             'account_id': int(p.account_id),
             'post_code': code,
