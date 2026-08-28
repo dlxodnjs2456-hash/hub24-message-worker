@@ -25,7 +25,7 @@ from . import checker_cancel
 from . import image_send
 from . import inline_posts
 
-VERSION='5.21.0'
+VERSION='5.21.1'
 
 
 def _drop_route(path, method=None):
