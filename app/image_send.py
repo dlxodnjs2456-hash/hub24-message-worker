@@ -16,13 +16,7 @@ class ImageJobCreate(BaseModel):
 
 
 def _current_run_contacts(user, batch, checked_ids):
-    """Return only contacts resolved by the latest contact-import run.
-
-    Older successful contact imports may still be RESOLVED in the same DB. The
-    latest batch progress tells us how many contacts each account resolved in
-    the current run, so only the newest N resolved rows for that account are
-    eligible for the next image job.
-    """
+    """Return only contacts resolved by the latest contact-import run."""
     checked_set = set(checked_ids)
     progress = batch.get('contact_import_account_progress') or {}
     all_rows = db.rows('contacts', user, eq={'batch_id': batch['id'], 'state': 'RESOLVED'}, order='created_at')
@@ -47,13 +41,31 @@ def _current_run_contacts(user, batch, checked_ids):
     return selected, current_counts
 
 
+def _active_inline_bot(user):
+    rows = db.rows('npay_inline_bots', user, eq={'is_active': True}, order='created_at', desc=True, limit=1)
+    return rows[0] if rows else None
+
+
 @app.post('/v1/image-jobs')
 def create_image_job(p: ImageJobCreate, user=Depends(auth)):
     stage = 'validate'
     try:
-        code = str(p.post_code or '').strip()
+        code = str(p.post_code or '').strip().upper()
         if not code:
-            raise HTTPException(400, 'POSTBOT_CODE_REQUIRED')
+            raise HTTPException(400, 'INLINE_POST_CODE_REQUIRED')
+
+        stage = 'inline_post'
+        posts = db.rows('npay_inline_posts', user, eq={'code': code, 'is_active': True}, order='created_at', desc=True, limit=1)
+        post = posts[0] if posts else None
+        if not post:
+            raise HTTPException(404, '등록된 게시물 코드를 찾을 수 없습니다.')
+        if not post.get('image_file_id'):
+            raise HTTPException(409, '현재 개인 Inline Bot 기준 이미지 재등록이 필요한 게시물입니다.')
+        inline_bot = _active_inline_bot(user)
+        if not inline_bot:
+            raise HTTPException(409, '개인 Inline Bot이 등록되어 있지 않습니다.')
+        if not inline_bot.get('owner_chat_id'):
+            raise HTTPException(409, '개인 Inline Bot 연결을 먼저 완료하세요.')
 
         stage = 'batch'
         batch = db.one('contact_batches', user, eq={'id': p.batch_id})
@@ -94,11 +106,11 @@ def create_image_job(p: ImageJobCreate, user=Depends(auth)):
         stage = 'reuse_check'
         existing_jobs = db.rows('jobs', user, eq={'batch_id': p.batch_id}, order='created_at', desc=True)
         for old in existing_jobs:
-            if str(old.get('operation_mode') or '') != 'IMAGE_POSTBOT':
+            if str(old.get('operation_mode') or '') != 'IMAGE_INLINE':
                 continue
             if str(old.get('status') or '').upper() not in ('WAITING', 'RUNNING', 'PAUSED'):
                 continue
-            if str(old.get('message_text') or '') != code:
+            if str(old.get('message_text') or '').upper() != code:
                 continue
             old_ids = {int(x) for x in (old.get('selected_account_ids') or [])}
             if old_ids != effective_set:
@@ -121,8 +133,6 @@ def create_image_job(p: ImageJobCreate, user=Depends(auth)):
 
         stage = 'wallet'
         required_points = len(contacts) * 15
-        # point_wallets has no id column, so do not use db.one(), whose default
-        # ordering is by id. Read the row directly by user_id instead.
         wallet_rows = db.sb.table('point_wallets').select('user_id,available_balance').eq('user_id', user).limit(1).execute().data or []
         wallet = wallet_rows[0] if wallet_rows else {}
         available_points = int(wallet.get('available_balance') or 0)
@@ -131,18 +141,16 @@ def create_image_job(p: ImageJobCreate, user=Depends(auth)):
             raise HTTPException(409, f'발송 포인트가 부족합니다. 필요 {required_points:,}P / 보유 {available_points:,}P / 현재 최대 {possible:,}건 발송 가능')
 
         stage = 'job_insert'
-        # IMAGE_POSTBOT never uses a bot token. Keep a non-empty schema marker
-        # instead of invoking encryption for an unused empty value.
         job = db.insert('jobs', {
             'user_id': user,
             'batch_id': p.batch_id,
             'status': 'WAITING',
-            'operation_mode': 'IMAGE_POSTBOT',
+            'operation_mode': 'IMAGE_INLINE',
             'message_text': code,
             'button_text': '',
             'button_url': '',
-            'bot_username': 'PostBot',
-            'bot_token_enc': 'IMAGE_POSTBOT_UNUSED',
+            'bot_username': inline_bot.get('bot_username') or '',
+            'bot_token_enc': 'IMAGE_INLINE_UNUSED',
             'delay_min': p.delay_min,
             'delay_max': p.delay_max,
             'global_dedupe': p.global_dedupe,
@@ -177,7 +185,7 @@ def create_image_job(p: ImageJobCreate, user=Depends(auth)):
             }, eq={'id': c['id'], 'user_id': user})
 
         stage = 'log'
-        event(user, jid, 'INFO', 'JOB', f'이미지+버튼 발송 JOB 생성 / 체크 {len(checked_ids)}개 / 실제 작업 {len(effective_ids)}개 / 이번 확인 대상 {len(targets)}건')
+        event(user, jid, 'INFO', 'JOB', f'자체 Inline 이미지+버튼 발송 JOB 생성 / 코드 {code} / 체크 {len(checked_ids)}개 / 실제 작업 {len(effective_ids)}개 / 이번 확인 대상 {len(targets)}건')
         result = dict(job)
         result['assigned_count'] = len(targets)
         result['requested_account_count'] = len(checked_ids)
