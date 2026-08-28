@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     encryption_key:str=''
     session_dir:str='./data/sessions'
     cors_origins:str='http://localhost:3000,https://hub24-message-web-sandy.vercel.app,https://hub24-message-web.vercel.app'
+    public_base_url:str='https://hub24-message-worker.onrender.com'
     supabase_url:str=''
     supabase_service_role_key:str=''
     trongrid_api_key:str=''
