@@ -15,12 +15,6 @@ def _safe_error(e):
 
 
 async def _resolve_postbot(client):
-    """Resolve the inline bot once per Telegram client.
-
-    Some sessions fail when a bare username string is passed directly to
-    inline_query(). Resolve the bot entity first and use the resolved entity
-    for all inline queries made by that account.
-    """
     last_error = None
     for username in ('@PostBot', '@postbot', '@post_bot'):
         try:
@@ -32,7 +26,26 @@ async def _resolve_postbot(client):
     raise RuntimeError(f'POSTBOT_USERNAME_NOT_RESOLVED:{_safe_error(last_error)}')
 
 
-async def _run_image_job(user, jid):
+def _active_inline_bot(user):
+    rows = db.rows('npay_inline_bots', user, eq={'is_active': True}, order='created_at', desc=True, limit=1)
+    return rows[0] if rows else None
+
+
+async def _resolve_inline_bot(client, user):
+    bot = _active_inline_bot(user)
+    if not bot:
+        raise RuntimeError('INLINE_BOT_NOT_CONFIGURED')
+    username = str(bot.get('bot_username') or '').strip().lstrip('@')
+    if not username:
+        raise RuntimeError('INLINE_BOT_USERNAME_MISSING')
+    try:
+        entity = await client.get_entity('@' + username)
+    except Exception as e:
+        raise RuntimeError(f'INLINE_BOT_USERNAME_NOT_RESOLVED:{_safe_error(e)}')
+    return entity, username
+
+
+async def _run_image_job(user, jid, mode):
     job = db.one('jobs', user, eq={'id': jid})
     if not job:
         return
@@ -51,10 +64,18 @@ async def _run_image_job(user, jid):
     sent_phones = {str(x.get('phone') or '') for x in history if x.get('phone')}
     sent_uids = {str(x.get('telegram_user_id') or '') for x in history if x.get('telegram_user_id')}
     dedupe_lock = asyncio.Lock()
-    post_code = str(job.get('message_text') or '').strip()
+    post_code = str(job.get('message_text') or '').strip().upper()
+    source_label = '자체 Inline Bot' if mode == 'IMAGE_INLINE' else 'PostBot'
+
+    if mode == 'IMAGE_INLINE':
+        posts = db.rows('npay_inline_posts', user, eq={'code': post_code, 'is_active': True}, order='created_at', desc=True, limit=1)
+        if not posts or not posts[0].get('image_file_id'):
+            db.update('jobs', {'status': 'PAUSED', 'stop_reason': 'INLINE_POST_NOT_READY', 'updated_at': main.now_iso()}, eq={'id': jid, 'user_id': user})
+            main.event(user, jid, 'ERROR', 'SOURCE', f'게시물 코드 {post_code}를 현재 Inline Bot에서 사용할 수 없습니다.')
+            return
 
     db.update('jobs', {'status': 'RUNNING', 'updated_at': main.now_iso()}, eq={'id': jid, 'user_id': user})
-    main.event(user, jid, 'INFO', 'JOB', f'이미지+버튼 병렬 발송 시작 / 계정 {len(groups)}개')
+    main.event(user, jid, 'INFO', 'JOB', f'이미지+버튼 병렬 발송 시작 / 계정 {len(groups)}개 / {source_label}')
 
     try:
         first_account = next((accounts.get(aid) for aid in groups if accounts.get(aid)), None)
@@ -63,16 +84,19 @@ async def _run_image_job(user, jid):
         probe = await client_from_account(first_account)
         try:
             await probe.connect()
-            postbot = await _resolve_postbot(probe)
-            probe_results = await probe.inline_query(postbot, post_code)
+            if mode == 'IMAGE_INLINE':
+                source_bot, _ = await _resolve_inline_bot(probe, user)
+            else:
+                source_bot = await _resolve_postbot(probe)
+            probe_results = await probe.inline_query(source_bot, post_code)
             if not probe_results:
-                raise RuntimeError('POSTBOT_RESULT_NOT_FOUND')
+                raise RuntimeError('INLINE_RESULT_NOT_FOUND' if mode == 'IMAGE_INLINE' else 'POSTBOT_RESULT_NOT_FOUND')
         finally:
             try:
                 await probe.disconnect()
             except Exception:
                 pass
-        main.event(user, jid, 'INFO', 'SOURCE', 'PostBot 이미지+버튼 원본 확인 완료')
+        main.event(user, jid, 'INFO', 'SOURCE', f'{source_label} 이미지+버튼 원본 확인 완료 / 코드 {post_code}')
 
         async def account_sender(aid, rows):
             account = accounts.get(aid)
@@ -86,7 +110,10 @@ async def _run_image_job(user, jid):
                     me = await client.get_me()
                     if not me:
                         raise RuntimeError(f'ACCOUNT_NOT_READY:{aid}')
-                    postbot = await _resolve_postbot(client)
+                    if mode == 'IMAGE_INLINE':
+                        source_bot, _ = await _resolve_inline_bot(client, user)
+                    else:
+                        source_bot = await _resolve_postbot(client)
                     main.event(user, jid, 'INFO', 'ACCOUNT', f'이미지 발송 계정 시작 / 배정 {len(rows)}건', aid)
 
                     for target in rows:
@@ -132,9 +159,9 @@ async def _run_image_job(user, jid):
 
                         try:
                             peer = await client.get_input_entity(int(uid))
-                            results = await client.inline_query(postbot, post_code)
+                            results = await client.inline_query(source_bot, post_code)
                             if not results:
-                                raise RuntimeError('POSTBOT_RESULT_NOT_FOUND')
+                                raise RuntimeError('INLINE_RESULT_NOT_FOUND' if mode == 'IMAGE_INLINE' else 'POSTBOT_RESULT_NOT_FOUND')
                             sent = await results[0].click(peer)
                             mid = int(getattr(sent, 'id', 0) or 0) or None
 
@@ -186,7 +213,11 @@ async def _run_image_job(user, jid):
                                 continue
 
                             text = str(e)
-                            if 'POSTBOT_RESULT_NOT_FOUND' in text:
+                            if 'INLINE_RESULT_NOT_FOUND' in text:
+                                code = 'INLINE_RESULT_NOT_FOUND'
+                            elif 'INLINE_BOT_NOT_CONFIGURED' in text or 'INLINE_BOT_USERNAME' in text:
+                                code = 'INLINE_BOT_NOT_RESOLVED'
+                            elif 'POSTBOT_RESULT_NOT_FOUND' in text:
                                 code = 'POSTBOT_RESULT_NOT_FOUND'
                             elif 'POSTBOT_USERNAME_NOT_RESOLVED' in text or 'No user has' in text:
                                 code = 'POSTBOT_USERNAME_NOT_RESOLVED'
@@ -239,8 +270,9 @@ async def _run_image_job(user, jid):
 
 async def run_job(user, jid):
     job = db.one('jobs', user, eq={'id': jid})
-    if job and str(job.get('operation_mode') or '') == 'IMAGE_POSTBOT':
-        return await _run_image_job(user, jid)
+    mode = str((job or {}).get('operation_mode') or '')
+    if mode in ('IMAGE_INLINE', 'IMAGE_POSTBOT'):
+        return await _run_image_job(user, jid, mode)
     return await _previous_run_job(user, jid)
 
 
