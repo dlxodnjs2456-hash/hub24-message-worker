@@ -75,6 +75,8 @@ async def register_inline_bot(p: InlineBotRegister, user=Depends(auth)):
     bot_id = int((me or {}).get('id') or 0)
     if not username or not bot_id:
         raise HTTPException(400, 'Bot username을 확인할 수 없습니다.')
+    if not bool((me or {}).get('supports_inline_queries')):
+        raise HTTPException(409, f'@{username} 봇의 Inline Mode가 꺼져 있습니다. BotFather에서 이 봇을 선택한 뒤 /setinline을 실행하고 다시 등록하세요.')
 
     current = _active_bot(user)
     replacing = bool(current and int(current.get('bot_id') or 0) != bot_id)
