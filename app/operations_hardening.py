@@ -80,3 +80,66 @@ def admin_logs(user=Depends(auth)):
 @app.get('/v1/admin/market/trades/{tid}/evidence')
 def admin_trade_evidence(tid:int,user=Depends(auth)):
     require_admin(user);return {'items':q('trade_dispute_evidence').select('*').eq('trade_id',tid).order('created_at').execute().data or []}
+
+
+def _restricted_retry_failure(target):
+    text=(' '.join([str(target.get('error_code') or ''),str(target.get('error_detail') or ''),str(target.get('stage') or '')])).upper()
+    markers=('FROZEN','FLOOD_WAIT','RATE_LIMIT','TOO MANY REQUESTS','METHOD THAT IS NOT AVAILABLE FOR FROZEN ACCOUNTS','TELEGRAM_RATE_LIMIT')
+    return any(x in text for x in markers)
+
+@app.post('/v1/jobs/{jid}/reuse-cleanup')
+def job_reuse_cleanup(jid:int,user=Depends(auth)):
+    job=db.one('jobs',user,eq={'id':jid})
+    if not job: raise HTTPException(404,'JOB_NOT_FOUND')
+    if str(job.get('status') or '').upper()=='RUNNING':
+        raise HTTPException(409,'진행 중인 JOB은 정리할 수 없습니다. 먼저 일시정지 또는 중지하세요.')
+
+    targets=db.rows('job_targets',user,eq={'job_id':jid},order='created_at')
+    sent=[x for x in targets if str(x.get('state') or '').upper()=='SENT']
+    failed=[x for x in targets if str(x.get('state') or '').upper()=='FAILED']
+    restricted=[x for x in failed if _restricted_retry_failure(x)]
+    retry=[x for x in failed if not _restricted_retry_failure(x)]
+
+    ready=db.rows('telegram_accounts',user,eq={'status':'READY'},order='created_at')
+    ready_ids=[int(x['id']) for x in ready]
+    if retry and not ready_ids:
+        raise HTTPException(409,'FAILED 재배치에 사용할 READY Telegram 계정이 없습니다.')
+
+    for t in sent:
+        db.delete('job_targets',eq={'id':t['id'],'user_id':user})
+
+    for i,t in enumerate(retry):
+        old=int(t.get('assigned_account_id') or 0)
+        candidates=[x for x in ready_ids if x!=old] or ready_ids
+        aid=candidates[i%len(candidates)]
+        db.update('job_targets',{
+            'assigned_account_id':aid,
+            'state':'WAITING',
+            'stage':'FAILED 재배치 / 발송 대기',
+            'error_code':None,
+            'error_detail':None,
+            'message_id':None,
+            'updated_at':now_iso(),
+        },eq={'id':t['id'],'user_id':user})
+
+    for t in restricted:
+        db.update('job_targets',{
+            'stage':'Telegram 제한 실패 / 운영자 확인 필요',
+            'updated_at':now_iso(),
+        },eq={'id':t['id'],'user_id':user})
+
+    remaining=db.rows('job_targets',user,eq={'job_id':jid},order=None)
+    waiting=sum(1 for x in remaining if str(x.get('state') or '').upper() in ('WAITING','PROCESSING'))
+    failed_count=sum(1 for x in remaining if str(x.get('state') or '').upper()=='FAILED')
+    next_status='WAITING' if waiting>0 else ('PAUSED' if failed_count>0 else 'COMPLETED')
+    db.update('jobs',{
+        'status':next_status,
+        'total_count':len(remaining),
+        'sent_count':0,
+        'failed_count':failed_count,
+        'pending_count':waiting,
+        'stop_reason':'RESTRICTED_FAILURES_REQUIRE_OPERATOR' if restricted else None,
+        'updated_at':now_iso(),
+    },eq={'id':jid,'user_id':user})
+    db.event(user,jid,'INFO','JOB',f'재사용 정리 완료 / SENT {len(sent)}건 제외 / FAILED 재배치 {len(retry)}건 / 제한 실패 보류 {len(restricted)}건')
+    return {'ok':True,'sent_removed':len(sent),'failed_requeued':len(retry),'restricted_kept':len(restricted),'remaining':len(remaining),'status':next_status}
