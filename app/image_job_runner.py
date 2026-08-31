@@ -1,6 +1,8 @@
 import asyncio
 import random
 
+from telethon.tl import functions
+
 from . import db
 from . import main
 from . import telegram_phase64_hardening as phase64
@@ -38,11 +40,24 @@ async def _resolve_inline_bot(client, user):
     username = str(bot.get('bot_username') or '').strip().lstrip('@')
     if not username:
         raise RuntimeError('INLINE_BOT_USERNAME_MISSING')
+
+    # Do not rely on Telethon's local entity cache. Newly-created or newly-used
+    # bots are often absent from a user session cache even though the username
+    # is valid. Ask Telegram to resolve the public username directly, then use
+    # the returned User entity for GetInlineBotResultsRequest.
     try:
-        entity = await client.get_entity('@' + username)
+        resolved = await client(functions.contacts.ResolveUsernameRequest(username=username))
+        users = list(getattr(resolved, 'users', None) or [])
+        entity = next((x for x in users if int(getattr(x, 'id', 0) or 0) == int(bot.get('bot_id') or 0)), None)
+        if entity is None and users:
+            entity = users[0]
+        if entity is None:
+            raise RuntimeError('TELEGRAM_RESOLVE_RETURNED_NO_USER')
+        if not bool(getattr(entity, 'bot', False)):
+            raise RuntimeError('RESOLVED_USERNAME_IS_NOT_BOT')
+        return entity, username
     except Exception as e:
         raise RuntimeError(f'INLINE_BOT_USERNAME_NOT_RESOLVED:{_safe_error(e)}')
-    return entity, username
 
 
 async def _run_image_job(user, jid, mode):
