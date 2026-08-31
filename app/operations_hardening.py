@@ -143,3 +143,52 @@ def job_reuse_cleanup(jid:int,user=Depends(auth)):
     },eq={'id':jid,'user_id':user})
     db.event(user,jid,'INFO','JOB',f'재사용 정리 완료 / SENT {len(sent)}건 제외 / FAILED 재배치 {len(retry)}건 / 제한 실패 보류 {len(restricted)}건')
     return {'ok':True,'sent_removed':len(sent),'failed_requeued':len(retry),'restricted_kept':len(restricted),'remaining':len(remaining),'status':next_status}
+
+
+@app.post('/v1/jobs/{jid}/release-restriction')
+def release_job_restriction(jid:int,user=Depends(auth)):
+    job=db.one('jobs',user,eq={'id':jid})
+    if not job:
+        raise HTTPException(404,'JOB_NOT_FOUND')
+    if str(job.get('status') or '').upper()=='RUNNING':
+        raise HTTPException(409,'진행 중인 JOB은 제한 상태를 해제할 수 없습니다. 먼저 일시정지 상태를 확인하세요.')
+
+    targets=db.rows('job_targets',user,eq={'job_id':jid},order='created_at')
+    restricted=[]
+    for t in targets:
+        state=str(t.get('state') or '').upper()
+        if state in ('WAITING','FAILED','CHECK_REQUIRED') and _restricted_retry_failure(t):
+            restricted.append(t)
+
+    stop_reason=str(job.get('stop_reason') or '').upper()
+    job_marked=('RATE_LIMIT' in stop_reason or 'FROZEN' in stop_reason or 'RESTRICTED' in stop_reason)
+    if not restricted and not job_marked:
+        raise HTTPException(409,'이 JOB에서 해제할 Telegram 제한 상태가 확인되지 않습니다.')
+
+    for t in restricted:
+        db.update('job_targets',{
+            'state':'WAITING',
+            'stage':'운영자 확인 완료 / 수동 재개 대기',
+            'error_code':None,
+            'error_detail':None,
+            'updated_at':now_iso(),
+        },eq={'id':t['id'],'user_id':user})
+
+    remaining=db.rows('job_targets',user,eq={'job_id':jid},order=None)
+    waiting=sum(1 for x in remaining if str(x.get('state') or '').upper() in ('WAITING','PROCESSING'))
+    failed_count=sum(1 for x in remaining if str(x.get('state') or '').upper()=='FAILED')
+    db.update('jobs',{
+        'status':'PAUSED',
+        'stop_reason':'OPERATOR_RELEASED_PENDING_MANUAL_RESUME',
+        'failed_count':failed_count,
+        'pending_count':waiting,
+        'updated_at':now_iso(),
+    },eq={'id':jid,'user_id':user})
+    db.event(user,jid,'INFO','RATE_LIMIT',f'운영자 수동 확인 완료 / 제한 상태 {len(restricted)}건 해제 / 자동 재개 안 함')
+    return {
+        'ok':True,
+        'released_count':len(restricted),
+        'status':'PAUSED',
+        'resume_required':True,
+        'message':'내부 제한 상태만 해제했습니다. Telegram 제한 우회가 아니며, 상태 확인 후 시작/재개를 직접 눌러야 합니다.',
+    }
