@@ -1,6 +1,7 @@
 import math
+import uuid
 from datetime import datetime, timezone
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from .main import app, auth, now_iso
 from . import db
@@ -63,6 +64,22 @@ def list_telegram_communities(category:str='',search:str='',user=Depends(auth)):
 @app.get('/v1/telegram-communities/mine')
 def my_telegram_communities(user=Depends(auth)):
     return {'items':q('npay_telegram_communities').select('*').eq('user_id',user).order('created_at',desc=True).execute().data or []}
+
+@app.post('/v1/telegram-communities/image-upload')
+async def upload_telegram_community_image(file: UploadFile = File(...), user=Depends(auth)):
+    mime=(file.content_type or '').lower()
+    ext={'image/jpeg':'jpg','image/png':'png','image/webp':'webp'}.get(mime)
+    if not ext: raise HTTPException(400,'IMAGE_TYPE_NOT_ALLOWED')
+    raw=await file.read()
+    if not raw: raise HTTPException(400,'IMAGE_FILE_EMPTY')
+    if len(raw)>5*1024*1024: raise HTTPException(400,'IMAGE_FILE_TOO_LARGE')
+    path=f'{user}/{uuid.uuid4().hex}.{ext}'
+    try:
+        db.sb.storage.from_('npay-community-images').upload(path,raw,{'content-type':mime,'upsert':'false'})
+        url=db.sb.storage.from_('npay-community-images').get_public_url(path)
+        return {'ok':True,'image_url':url,'path':path}
+    except Exception as e:
+        raise HTTPException(500,f'IMAGE_UPLOAD_FAILED:{str(e)[:200]}')
 
 @app.post('/v1/telegram-communities')
 def create_telegram_community(p:CommunityCreate,user=Depends(auth)):
