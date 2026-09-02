@@ -28,7 +28,7 @@ from . import checker_cancel
 from . import image_send
 from . import inline_posts
 
-VERSION='5.23.1'
+VERSION='5.23.2'
 
 
 def _drop_route(path, method=None):
@@ -70,4 +70,4 @@ def health_db():
 
 @app.get('/health/management')
 def health_management():
-    return {'ok':True,'service':'hub24-worker','version':VERSION,'management_routes':True,'marketplace_routes':True,'community_routes':True,'telegram_community_directory_routes':True,'telegram_community_ranking':True,'telegram_community_likes':True,'telegram_community_comments':True,'telegram_community_category_admin':True,'username_signup':True,'legacy_email_users_preserved':True,'telegram_rate_limit_auto_failover':False,'telegram_operator_restriction_release':True,'telegram_restriction_release_auto_resume':False,'image_send_route':True,'image_send_job_mode':'IMAGE_INLINE','personal_inline_bot_routes':True,'checker_routes':True,'checker_cancel':True,'checker_restart_recovery':True,'legacy_manual_charge_routes':False,'legacy_withdrawal_route':False}
+    return {'ok':True,'service':'hub24-worker','version':VERSION,'management_routes':True,'marketplace_routes':True,'community_routes':True,'telegram_community_directory_routes':True,'telegram_community_ranking':True,'telegram_community_likes':True,'telegram_community_comments':True,'telegram_community_category_admin':True,'telegram_community_image_upload':True,'username_signup':True,'legacy_email_users_preserved':True,'telegram_rate_limit_auto_failover':False,'telegram_operator_restriction_release':True,'telegram_restriction_release_auto_resume':False,'image_send_route':True,'image_send_job_mode':'IMAGE_INLINE','personal_inline_bot_routes':True,'checker_routes':True,'checker_cancel':True,'checker_restart_recovery':True,'legacy_manual_charge_routes':False,'legacy_withdrawal_route':False}
